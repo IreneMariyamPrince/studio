@@ -109,7 +109,13 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     };
   } catch (error) {
     // Catch any unexpected top-level errors (less likely with Promise.allSettled)
-    console.error("Unexpected error fetching dashboard stats:", error);
+    // Check if error is Prisma Initialization Error (although handled above, good for robustness)
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error("[ACTION_ERROR] Top-Level Prisma Initialization Error fetching dashboard stats:", error.message);
+         console.error("Database connection failed.");
+     } else {
+         console.error("Unexpected error fetching dashboard stats:", error);
+     }
     return defaultStats;
   }
 }
