@@ -113,9 +113,9 @@ export async function getInvoices(): Promise<InvoiceSchema[]> {
   } catch (error) {
       if (checkPrismaInitError(error, 'getInvoices')) {
            console.warn("Returning empty invoices list due to database connection failure.");
-       } else {
+     } else {
            console.error("[ACTION_ERROR] Error fetching invoices:", error);
-       }
+     }
        return [];
   }
 }
