@@ -3,7 +3,7 @@
 
 import prisma from '@/lib/prisma';
 import { endOfMonth, startOfMonth } from 'date-fns';
-import type { Prisma } from '@prisma/client'; // Import Prisma namespace
+import { Prisma } from '@prisma/client'; // Import Prisma namespace
 
 export interface DashboardStats {
   totalExpensesThisMonth: number;
@@ -55,7 +55,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
         where: { status: 'Pending' },
       }),
       // 5. Active Accounts Count
-      prisma.account.count(),
+      prisma.account.count({ where: { isActive: true }}), // Count only active accounts
     ]);
 
     // Process results safely
