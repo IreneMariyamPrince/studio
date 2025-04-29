@@ -11,6 +11,7 @@ import { Header } from './header';
 import { SidebarNav } from './sidebar-nav';
 import { cn } from '@/lib/utils';
 import { TooltipProvider } from '@/components/ui/tooltip'; // Ensure TooltipProvider is used
+import Link from 'next/link'; // Import the Link component
 
 interface DashboardLayoutProps {
   children: ReactNode;
