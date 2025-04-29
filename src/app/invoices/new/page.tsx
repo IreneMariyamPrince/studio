@@ -17,7 +17,8 @@ import { cn } from "@/lib/utils";
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { invoiceFormSchema, InvoiceFormSchema, invoiceStatus, ClientSchema, InvoiceItemSchema } from '@/lib/schemas/invoice';
-import { getClients, createInvoice } from '@/lib/actions/invoices'; // Import actions
+import { createInvoice } from '@/lib/actions/invoices'; // Import invoice action
+import { getClients } from '@/lib/actions/clients'; // Import getClients action directly
 import { useToast } from "@/hooks/use-toast";
 import { useRouter } from 'next/navigation';
 import {
@@ -40,11 +41,21 @@ export default function NewInvoicePage() {
   // Fetch clients on component mount
   useEffect(() => {
     async function fetchClients() {
-      const clientData = await getClients();
-      setClients(clientData.map(c => ({ value: c.id, label: c.name })));
+      try {
+        const clientData = await getClients(); // Call the imported function
+        setClients(clientData.map(c => ({ value: c.id!, label: c.name })));
+      } catch (error) {
+          console.error("Failed to fetch clients:", error);
+          // Optionally show a toast message
+          toast({
+              title: "Error",
+              description: "Could not load clients. Please try again later.",
+              variant: "destructive",
+          })
+      }
     }
     fetchClients();
-  }, []);
+  }, [toast]); // Added toast to dependency array
 
   const form = useForm<InvoiceFormSchema>({
     resolver: zodResolver(invoiceFormSchema),
@@ -135,11 +146,11 @@ export default function NewInvoicePage() {
         });
          console.error("Error creating invoice:", result.error);
          // Optionally highlight fields with errors
-         if (result.error && typeof result.error === 'object') {
-             Object.entries(result.error).forEach(([fieldName, errors]) => {
-                if (Array.isArray(errors) && errors.length > 0) {
-                    form.setError(fieldName as keyof InvoiceFormSchema, { type: 'manual', message: errors[0] });
-                }
+         if (result.fieldErrors) { // Updated to check fieldErrors
+             Object.entries(result.fieldErrors).forEach(([fieldName, errors]) => {
+                 if (Array.isArray(errors) && errors.length > 0) {
+                     form.setError(fieldName as keyof InvoiceFormSchema, { type: 'manual', message: errors[0] });
+                 }
              });
          }
       }
@@ -165,7 +176,7 @@ export default function NewInvoicePage() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Client</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isPending}>
+                    <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isPending || clients.length === 0}>
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder="Select a client" />

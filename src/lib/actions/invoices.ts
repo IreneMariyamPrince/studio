@@ -1,3 +1,4 @@
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -6,6 +7,7 @@ import prisma from '@/lib/prisma';
 import { invoiceSchema, invoiceItemSchema, InvoiceSchema, invoiceFormSchema } from '@/lib/schemas/invoice';
 import { clientSchema } from '@/lib/schemas/client'; // Ensure client schema is correctly imported
 import type { Prisma } from '@prisma/client'; // Import Prisma types
+import { getClients as fetchClients } from './clients'; // Import client action for internal use if needed
 
 // Type definition for action results
 type ActionResult = {
@@ -16,15 +18,11 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// --- Client Actions (Keep existing client actions: getClients, addClient) ---
-export { getClients, addClient } from './clients'; // Assuming they are in a separate file now
-
 
 // --- Invoice Actions ---
 
 // Helper to generate the next invoice number
 async function getNextInvoiceNumber(): Promise<string> {
-  // ... (keep existing implementation)
     try {
       const lastInvoice = await prisma.invoice.findFirst({
         orderBy: { createdAt: 'desc' },
@@ -129,6 +127,12 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
              ...invoice.client,
              email: invoice.client.email ?? undefined,
              address: invoice.client.address ?? undefined,
+             // Add default values for missing optional fields during parsing if needed
+              phone: invoice.client.phone ?? undefined,
+              paymentTerms: invoice.client.paymentTerms ?? undefined,
+              balanceDue: invoice.client.balanceDue?.toNumber() ?? 0, // Handle Decimal
+              createdAt: invoice.client.createdAt,
+              updatedAt: invoice.client.updatedAt,
         }),
         items: invoice.items.map(item => invoiceItemSchema.parse({
             ...item,
@@ -138,7 +142,7 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
             // taxRate: item.taxRate ? taxRateSchema.parse({...item.taxRate, ratePercent: item.taxRate.ratePercent.toNumber()}) : undefined,
         })),
          revenueAccountId: invoice.revenueAccountId ?? undefined,
-         // revenueAccount: invoice.revenueAccount ? accountSchema.parse(invoice.revenueAccount) : undefined,
+         // revenueAccount: inv.revenueAccount ? accountSchema.parse(inv.revenueAccount) : undefined,
      });
   } catch (error) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
@@ -340,3 +344,8 @@ export async function deleteInvoice(id: string): Promise<ActionResult> {
     return { success: false, message: 'Database Error: Failed to delete invoice.', error: error instanceof Error ? error.message : String(error) };
   }
 }
+
+// Need to export this function explicitly if it's used elsewhere
+export { fetchClients };
+
+    
