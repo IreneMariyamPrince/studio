@@ -84,9 +84,12 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     ]);
 
     // Process results, checking for init errors
+    let initializationErrorOccurred = false;
     results.forEach((result, index) => {
         if (result.status === 'rejected') {
-            if (!checkPrismaInitError(result.reason, `getDashboardStats query ${index + 1}`)) {
+            if (checkPrismaInitError(result.reason, `getDashboardStats query ${index + 1}`)) {
+                initializationErrorOccurred = true; // Mark that an init error happened
+            } else {
                 // Log other non-init errors if needed
                 console.error(`[ACTION_ERROR] Error fetching dashboard data subset (Query ${index + 1}):`, result.reason);
             }
@@ -94,7 +97,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     });
 
      // If a critical DB connection error occurred in *any* of the queries, return defaults immediately.
-     if (prismaInitializationFailed) {
+     if (initializationErrorOccurred) {
          console.warn("Returning default dashboard stats due to database connection failure.");
          return defaultStats;
      }
@@ -145,6 +148,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 // --- Fetch Recent Data (Optional helpers for dashboard lists) ---
 
 export async function getRecentExpenses(limit = 5) {
+   // Reset flags for this request
+   prismaInitializationFailed = false;
+   libsslErrorLogged = false;
+
    try {
      const expenses = await prisma.expense.findMany({
        take: limit,
@@ -159,7 +166,7 @@ export async function getRecentExpenses(limit = 5) {
    } catch (error) {
        if (checkPrismaInitError(error, 'getRecentExpenses')) {
             console.warn("Returning empty recent expenses list due to database connection failure.");
-       } else {
+        } else {
             console.error("[ACTION_ERROR] Error fetching recent expenses:", error);
        }
        return []; // Return empty array on any error
@@ -167,6 +174,10 @@ export async function getRecentExpenses(limit = 5) {
 }
 
 export async function getRecentInvoices(limit = 5) {
+   // Reset flags for this request
+   prismaInitializationFailed = false;
+   libsslErrorLogged = false;
+
    try {
      const invoices = await prisma.invoice.findMany({
        take: limit,
