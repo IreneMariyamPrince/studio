@@ -3,6 +3,7 @@
 
 import prisma from '@/lib/prisma';
 import { endOfMonth, startOfMonth } from 'date-fns';
+import type { Prisma } from '@prisma/client'; // Import Prisma types
 
 export interface DashboardStats {
   totalExpensesThisMonth: number;
@@ -13,6 +14,15 @@ export interface DashboardStats {
   pendingInvoicesAmount: number;
 }
 
+const defaultStats: DashboardStats = {
+    totalExpensesThisMonth: 0,
+    pendingInvoicesCount: 0,
+    openExpenseReportsCount: 0,
+    activeAccountsCount: 0,
+    expenseChangePercent: null,
+    pendingInvoicesAmount: 0,
+};
+
 export async function getDashboardStats(): Promise<DashboardStats> {
   try {
     const now = new Date();
@@ -21,31 +31,63 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     const startOfLastMonth = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1));
     const endOfLastMonth = endOfMonth(startOfLastMonth);
 
-    // 1. Total Expenses This Month
-    const expensesThisMonth = await prisma.expense.aggregate({
-      _sum: { amount: true },
-      where: {
-        date: {
-          gte: startOfCurrentMonth,
-          lte: endOfCurrentMonth,
-        },
-        // Optionally filter by status: status: 'Approved'
-      },
-    });
-    const totalExpensesThisMonth = expensesThisMonth._sum.amount ?? 0;
+    // Use Promise.allSettled to handle potential errors in individual queries gracefully
+    const results = await Promise.allSettled([
+      // 1. Expenses This Month
+      prisma.expense.aggregate({
+        _sum: { amount: true },
+        where: { date: { gte: startOfCurrentMonth, lte: endOfCurrentMonth } },
+      }),
+      // 2. Expenses Last Month
+      prisma.expense.aggregate({
+        _sum: { amount: true },
+        where: { date: { gte: startOfLastMonth, lte: endOfLastMonth } },
+      }),
+      // 3. Pending Invoices Count & Amount
+      prisma.invoice.aggregate({
+        _count: { id: true },
+        _sum: { total: true },
+        where: { status: 'Pending' },
+      }),
+      // 4. Open Expense Reports Count
+      prisma.expense.aggregate({
+        _count: { id: true },
+        where: { status: 'Pending' },
+      }),
+      // 5. Active Accounts Count
+      prisma.account.count(),
+    ]);
 
-     // Expenses Last Month (for comparison)
-     const expensesLastMonth = await prisma.expense.aggregate({
-       _sum: { amount: true },
-       where: {
-         date: {
-           gte: startOfLastMonth,
-           lte: endOfLastMonth,
-         },
-          // status: 'Approved'
-       },
-     });
-     const totalExpensesLastMonth = expensesLastMonth._sum.amount ?? 0;
+    // Process results safely
+    const expensesThisMonthRes = results[0];
+    const expensesLastMonthRes = results[1];
+    const pendingInvoicesRes = results[2];
+    const openExpensesRes = results[3];
+    const accountsCountRes = results[4];
+
+    // Handle potential Prisma Initialization errors from any query
+    for (const result of results) {
+        if (result.status === 'rejected' && result.reason instanceof Prisma.PrismaClientInitializationError) {
+            console.error("[ACTION_ERROR] Prisma Initialization Error fetching dashboard stats:", result.reason.message);
+            if (result.reason.message.includes('libssl')) {
+                console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+            }
+            console.error("Database connection failed. Please check server logs.");
+            return defaultStats; // Return default stats if connection failed
+        } else if (result.status === 'rejected') {
+            // Log other errors but potentially continue if possible
+            console.error("[ACTION_ERROR] Error fetching dashboard data subset:", result.reason);
+        }
+    }
+
+    // Calculate stats from successful results, default to 0 if a query failed for other reasons
+    const totalExpensesThisMonth = expensesThisMonthRes.status === 'fulfilled' ? expensesThisMonthRes.value._sum.amount ?? 0 : 0;
+    const totalExpensesLastMonth = expensesLastMonthRes.status === 'fulfilled' ? expensesLastMonthRes.value._sum.amount ?? 0 : 0;
+    const pendingInvoicesCount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._count.id ?? 0 : 0;
+    const pendingInvoicesAmount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._sum.total ?? 0 : 0;
+    const openExpenseReportsCount = openExpensesRes.status === 'fulfilled' ? openExpensesRes.value._count.id ?? 0 : 0;
+    const activeAccountsCount = accountsCountRes.status === 'fulfilled' ? accountsCountRes.value ?? 0 : 0;
+
 
      // Calculate percentage change
      let expenseChangePercent: number | null = null;
@@ -56,30 +98,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
      } // else remains null if both are 0
 
 
-    // 2. Pending Invoices Count & Amount
-    const pendingInvoices = await prisma.invoice.aggregate({
-      _count: { id: true },
-      _sum: { total: true },
-      where: {
-        status: 'Pending',
-         // Optionally add dueDate condition, e.g., dueDate: { gte: now }
-      },
-    });
-    const pendingInvoicesCount = pendingInvoices._count.id ?? 0;
-    const pendingInvoicesAmount = pendingInvoices._sum.total ?? 0;
-
-    // 3. Open Expense Reports Count (Assuming 'Pending' status)
-    const openExpenseReports = await prisma.expense.aggregate({
-      _count: { id: true },
-      where: {
-        status: 'Pending',
-      },
-    });
-    const openExpenseReportsCount = openExpenseReports._count.id ?? 0;
-
-    // 4. Active Accounts Count
-    const activeAccountsCount = await prisma.account.count(); // Count all accounts
-
     return {
       totalExpensesThisMonth,
       pendingInvoicesCount,
@@ -89,16 +107,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingInvoicesAmount,
     };
   } catch (error) {
-    console.error("Error fetching dashboard stats:", error);
-    // Return default/zero values on error
-    return {
-      totalExpensesThisMonth: 0,
-      pendingInvoicesCount: 0,
-      openExpenseReportsCount: 0,
-      activeAccountsCount: 0,
-      expenseChangePercent: null,
-      pendingInvoicesAmount: 0,
-    };
+    // Catch any unexpected top-level errors (less likely with Promise.allSettled)
+    console.error("Unexpected error fetching dashboard stats:", error);
+    return defaultStats;
   }
 }
 
@@ -113,6 +124,14 @@ export async function getRecentExpenses(limit = 5) {
      });
      return expenses;
    } catch (error) {
+      if (error instanceof Prisma.PrismaClientInitializationError) {
+            console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent expenses:", error.message);
+             if (error.message.includes('libssl')) {
+                 console.error("Check 'libssl' dependency.");
+             }
+             console.error("Database connection failed.");
+             return []; // Return empty on connection failure
+       }
       console.error("Error fetching recent expenses:", error);
       return [];
    }
@@ -127,6 +146,14 @@ export async function getRecentInvoices(limit = 5) {
      });
      return invoices;
    } catch (error) {
+       if (error instanceof Prisma.PrismaClientInitializationError) {
+            console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent invoices:", error.message);
+             if (error.message.includes('libssl')) {
+                 console.error("Check 'libssl' dependency.");
+             }
+             console.error("Database connection failed.");
+             return []; // Return empty on connection failure
+       }
       console.error("Error fetching recent invoices:", error);
       return [];
    }

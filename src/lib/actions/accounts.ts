@@ -28,8 +28,9 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         if (error.message.includes('libssl')) {
           console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
         }
-        // Return empty array to prevent breaking the page, but signal the error
-         throw new Error("Database connection failed. Please check server logs for details. Missing system libraries like 'libssl' might be the cause.");
+        // Return empty array to prevent breaking the page, but signal the error via logs
+        console.error("Database connection failed. Please check server logs for details. Missing system libraries like 'libssl' might be the cause.");
+        return []; // Return empty array instead of throwing
     } else {
         // Log other types of errors
         console.error("[ACTION_ERROR] Error fetching accounts:", error);
@@ -293,8 +294,9 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
         if (error.message.includes('libssl')) {
           console.error("Check if 'libssl' or 'openssl' is installed in the environment.");
         }
-        // Propagate the error to indicate failure
-        throw new Error("Database connection failed while fetching account. Missing system libraries like 'libssl' might be the cause.");
+        // Return null instead of throwing to prevent page crash, log indicates the issue
+        console.error("Database connection failed while fetching account. Missing system libraries like 'libssl' might be the cause.");
+        return null;
      } else {
         console.error(`[ACTION_ERROR] Error fetching account with ID ${id}:`, error);
      }

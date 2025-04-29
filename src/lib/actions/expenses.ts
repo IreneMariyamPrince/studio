@@ -39,8 +39,16 @@ export async function getExpenses(): Promise<ExpenseSchema[]> {
          receiptUrl: exp.receiptUrl ?? undefined,
      }));
   } catch (error) {
+    if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error("[ACTION_ERROR] Prisma Initialization Error fetching expenses:", error.message);
+        if (error.message.includes('libssl')) {
+            console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+        }
+        console.error("Database connection failed. Please check server logs.");
+        return []; // Return empty array instead of throwing
+    }
     console.error("[ACTION_ERROR] Error fetching expenses:", error);
-    return []; // Return empty array on error
+    return []; // Return empty array on other errors
   }
 }
 
@@ -66,6 +74,14 @@ export async function getExpenseById(id: string): Promise<ExpenseSchema | null> 
          receiptUrl: expense.receiptUrl ?? undefined,
      });
   } catch (error) {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error(`[ACTION_ERROR] Prisma Initialization Error fetching expense ${id}:`, error.message);
+          if (error.message.includes('libssl')) {
+              console.error("Check 'libssl' dependency.");
+          }
+          console.error("Database connection failed.");
+          return null; // Return null on connection failure
+      }
      console.error(`[ACTION_ERROR] Error fetching expense ${id}:`, error);
     return null;
   }
@@ -131,6 +147,16 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
                fieldErrors: { accountId: ['Invalid account selected.'] }
             };
         }
+    } else if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error("[DB_ERROR] Prisma Initialization Error during expense creation:", error.message);
+        if (error.message.includes('libssl')) {
+            console.error("Check 'libssl' dependency.");
+        }
+        return {
+            success: false,
+            message: 'Database Connection Error. Failed to add expense.',
+            error: 'Initialization Error'
+        };
     }
     return {
         success: false,
@@ -203,7 +229,17 @@ export async function updateExpense(formData: FormData): Promise<ActionResult> {
                 fieldErrors: { accountId: ['Invalid account selected.'] }
             };
          }
-     }
+     } else if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error("[DB_ERROR] Prisma Initialization Error during expense update:", error.message);
+        if (error.message.includes('libssl')) {
+            console.error("Check 'libssl' dependency.");
+        }
+        return {
+            success: false,
+            message: 'Database Connection Error. Failed to update expense.',
+            error: 'Initialization Error'
+        };
+    }
     return {
         success: false,
         message: 'Database Error: Failed to update expense.',
@@ -237,7 +273,17 @@ export async function deleteExpense(id: string): Promise<ActionResult> {
          if (error.code === 'P2025') {
              return { success: false, message: 'Expense not found. It may have already been deleted.', error: error.code };
          }
-      }
+      } else if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error("[DB_ERROR] Prisma Initialization Error during expense deletion:", error.message);
+        if (error.message.includes('libssl')) {
+            console.error("Check 'libssl' dependency.");
+        }
+        return {
+            success: false,
+            message: 'Database Connection Error. Failed to delete expense.',
+            error: 'Initialization Error'
+        };
+    }
      return {
         success: false,
         message: 'Database Error: Failed to delete expense.',
@@ -257,6 +303,14 @@ export async function getExpenseCategories(): Promise<{ value: string; label: st
      });
      return expenseAccounts.map(acc => ({ value: acc.id, label: acc.name }));
    } catch (error) {
+        if (error instanceof Prisma.PrismaClientInitializationError) {
+            console.error("[ACTION_ERROR] Prisma Initialization Error fetching expense categories:", error.message);
+             if (error.message.includes('libssl')) {
+                 console.error("Check 'libssl' dependency.");
+             }
+             console.error("Database connection failed.");
+             return []; // Return empty on connection failure
+       }
      console.error("[ACTION_ERROR] Error fetching expense categories:", error);
      return [];
    }
