@@ -73,7 +73,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
                 console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
             }
             console.error("Database connection failed. Please check server logs.");
-            // Return empty array to prevent breaking UI completely
+            // Return default stats to prevent breaking UI completely
             return defaultStats;
         } else if (result.status === 'rejected') {
             // Log other errors but potentially continue if possible
