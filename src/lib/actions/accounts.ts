@@ -10,18 +10,18 @@ import { Prisma } from '@prisma/client'; // Import Prisma namespace
 // Type definition for the result of actions
 type ActionResult = { success: boolean; message: string; error?: unknown; fieldErrors?: Record<string, string[]> };
 
-// Centralized flag to track if a critical init error occurred
+// Centralized flag to track if a critical init error occurred during the current request cycle
 let prismaInitializationFailed = false;
 let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
 
 // Helper function to check and log Prisma init errors
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the flag
+         prismaInitializationFailed = true; // Set the flag for the current request
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
          if (error.message.includes('libssl') && !libsslErrorLogged) {
              console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
+             libsslErrorLogged = true; // Prevent repeated logging for this request
          } else if (!error.message.includes('libssl')) {
              console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
          }
@@ -32,7 +32,7 @@ function checkPrismaInitError(error: unknown, context: string): boolean {
 
 // --- Get All Accounts ---
 export async function getAccounts(): Promise<AccountSchema[]> {
-  // Reset flags for this request
+  // Reset flags for this request context
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
@@ -47,19 +47,21 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         balance: account.balance?.toNumber(), // Convert Decimal to number
     }));
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, 'getAccounts')) {
+     if (checkPrismaInitError(error, 'getAccounts')) {
         console.warn("Returning empty accounts list due to database connection failure.");
-    } else {
-        console.error("[ACTION_ERROR] Error fetching accounts:", error);
-    }
-    // Return empty array for any error to avoid breaking UI completely
-    return [];
+        // No need to throw here, just return empty array as fallback
+     } else {
+         // Log other types of errors
+         console.error("[ACTION_ERROR] Error fetching accounts:", error);
+     }
+     // Return empty array for any error to avoid breaking UI completely
+     return [];
   }
 }
 
 // --- Add New Account ---
 export async function addAccount(formData: FormData): Promise<ActionResult> {
-  // Reset flags for this request
+  // Reset flags for this request context
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
@@ -104,23 +106,29 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Account "${name}" (Code: ${code}) created successfully.` };
 
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, 'addAccount')) {
+     if (checkPrismaInitError(error, 'addAccount')) {
+         // Return specific error message for DB connection failure
          return { success: false, message: 'Database Connection Error: Could not connect to the database to add account.', error: 'Initialization Error' };
      }
 
+    // Handle other Prisma or unknown errors
     console.error("[DB_ERROR] Failed to create account:", error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      // Unique constraint violation (e.g., duplicate account code)
       if (error.code === 'P2002') {
          const target = (error.meta?.target as string[])?.join(', ') || 'field';
+         // Provide specific feedback if the duplicate is the code
         if (target.includes('code')) {
             return {
                 success: false, message: `Database Error: Account code "${code}" already exists.`, error: error.code,
                 fieldErrors: { code: [`Account code "${code}" already exists.`] }
             };
         }
+         // Generic unique constraint message otherwise
          return { success: false, message: `Database Error: A unique constraint failed on ${target}.`, error: error.code };
       }
     }
+    // Generic database error message
     return { success: false, message: 'Database Error: Failed to create account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -132,7 +140,7 @@ const updateAccountFormSchema = accountFormSchema.extend({
 });
 
 export async function updateAccount(formData: FormData): Promise<ActionResult> {
-  // Reset flags for this request
+  // Reset flags for this request context
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
@@ -173,9 +181,11 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
 
      console.error("[DB_ERROR] Failed to update account:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        // Handle specific known errors
         if (error.code === 'P2025') return { success: false, message: 'Database Error: Account not found.', error: error.code };
         if (error.code === 'P2002') {
            const target = (error.meta?.target as string[])?.join(', ') || 'field';
+           // Specific feedback for duplicate code
             if (target.includes('code')) {
                 return {
                     success: false, message: `Database Error: Account code "${updateData.code}" is already in use.`, error: error.code,
@@ -191,11 +201,12 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
 
 // --- Delete Account ---
 export async function deleteAccount(id: string): Promise<ActionResult> {
-  // Reset flags for this request
+  // Reset flags for this request context
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
-  if (!id || typeof id !== 'string' || id.length < 5) {
+  // Basic ID validation
+  if (!id || typeof id !== 'string' || id.length < 5) { // Basic CUID length check
      return { success: false, message: 'Invalid Account ID provided.' };
   }
 
@@ -205,19 +216,25 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
     // You might want a soft delete (setting isActive=false) instead of hard delete.
     const account = await prisma.account.findUnique({
         where: { id },
-        select: { balance: true, _count: { select: { expenses: true, journalEntryLines: true }} }
+        select: { balance: true, _count: { select: { expenses: true, journalEntryLines: true }} } // Check for relations
     });
 
+    // If account doesn't exist
     if (!account) {
          return { success: false, message: 'Account not found.', error: 'P2025' };
     }
 
-    // Add check for non-zero balance if required
+    // Add check for non-zero balance if required by business logic
     // if (account.balance?.toNumber() !== 0) {
     //     return { success: false, message: 'Cannot delete account with a non-zero balance.' };
     // }
 
-    // Attempt to delete (will fail if relations exist due to onDelete: Restrict)
+    // Check if related records exist (even if balance is zero)
+    if ((account._count?.expenses ?? 0) > 0 || (account._count?.journalEntryLines ?? 0) > 0) {
+        return { success: false, message: 'Cannot delete account: It is linked to existing Expenses or Journal Entries.', error: 'P2003' };
+    }
+
+    // Attempt to delete (should succeed if no relations exist)
     await prisma.account.delete({ where: { id } });
 
     revalidatePath('/chart-of-accounts');
@@ -230,11 +247,12 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
      }
 
      console.error("[DB_ERROR] Failed to delete account:", error);
+     // Handle Prisma errors that might occur despite checks (e.g., race conditions)
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2025') return { success: false, message: 'Account not found.', error: error.code };
-        // Foreign key constraint failed (onDelete: Restrict worked)
+        // Foreign key constraint failed (onDelete: Restrict worked - this case is covered above, but good practice)
         if (error.code === 'P2003') {
-           return { success: false, message: 'Cannot delete account: It is linked to existing Expenses or Journal Entries.', error: error.code };
+           return { success: false, message: 'Cannot delete account: It is linked to existing records.', error: error.code };
         }
       }
      return { success: false, message: 'Database Error: Failed to delete account.', error: error instanceof Error ? error.message : String(error) };
@@ -243,7 +261,7 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
 
 // --- Get Account by ID ---
 export async function getAccountById(id: string): Promise<AccountSchema | null> {
-  // Reset flags for this request
+  // Reset flags for this request context
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
@@ -251,6 +269,7 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
   try {
     const account = await prisma.account.findUnique({ where: { id } });
     if (!account) return null;
+    // Parse the fetched data using the main schema
     return accountSchema.parse({
         ...account,
         description: account.description ?? undefined,
@@ -262,6 +281,6 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
      } else {
         console.error(`[ACTION_ERROR] Error fetching account ${id}:`, error);
      }
-    return null; // Or throw / return error object
+    return null; // Return null on any error
   }
 }

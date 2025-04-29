@@ -23,19 +23,20 @@ const defaultStats: DashboardStats = {
     pendingInvoicesAmount: 0,
 };
 
-// Centralized flag to track if a critical init error occurred
+// Centralized flag to track if a critical init error occurred during the current request cycle
 let prismaInitializationFailed = false;
 let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
 
 // Helper function to check and log Prisma init errors
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the flag
+         prismaInitializationFailed = true; // Set the flag for the current request
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
          if (error.message.includes('libssl') && !libsslErrorLogged) {
              console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
+             libsslErrorLogged = true; // Prevent repeated logging for this request
          } else if (!error.message.includes('libssl')) {
+             // Log general initialization errors that are not libssl related
              console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
          }
          return true; // Indicate an init error occurred
@@ -45,7 +46,7 @@ function checkPrismaInitError(error: unknown, context: string): boolean {
 
 
 export async function getDashboardStats(): Promise<DashboardStats> {
-  // Reset flags for each request
+  // Reset flags for this request
   prismaInitializationFailed = false;
   libsslErrorLogged = false;
 
@@ -83,21 +84,17 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       prisma.account.count({ where: { isActive: true }}), // Count only active accounts
     ]);
 
-    // Process results, checking for init errors
-    let initializationErrorOccurred = false;
+    // Check each result for Prisma initialization errors
     results.forEach((result, index) => {
         if (result.status === 'rejected') {
-            if (checkPrismaInitError(result.reason, `getDashboardStats query ${index + 1}`)) {
-                initializationErrorOccurred = true; // Mark that an init error happened
-            } else {
-                // Log other non-init errors if needed
-                console.error(`[ACTION_ERROR] Error fetching dashboard data subset (Query ${index + 1}):`, result.reason);
-            }
+             // Use the helper to check and log the error appropriately
+             // No need to set initializationErrorOccurred flag here, checkPrismaInitError does it
+            checkPrismaInitError(result.reason, `getDashboardStats query ${index + 1}`);
         }
     });
 
      // If a critical DB connection error occurred in *any* of the queries, return defaults immediately.
-     if (initializationErrorOccurred) {
+     if (prismaInitializationFailed) {
          console.warn("Returning default dashboard stats due to database connection failure.");
          return defaultStats;
      }
@@ -136,21 +133,25 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       pendingInvoicesAmount,
     };
   } catch (error) {
-    // Catch any unexpected top-level errors (less likely with Promise.allSettled)
-    if (!checkPrismaInitError(error, 'getDashboardStats top-level')) {
+     // Catch any unexpected top-level errors (less likely with Promise.allSettled)
+     // Check if it's an initialization error that wasn't caught in the loop (unlikely but safe)
+     if (checkPrismaInitError(error, 'getDashboardStats top-level')) {
+         console.warn("Returning default dashboard stats due to top-level database connection failure.");
+     } else {
          console.error("Unexpected error fetching dashboard stats:", error);
-    }
-    console.warn("Returning default dashboard stats due to error.");
-    return defaultStats;
+         console.warn("Returning default dashboard stats due to unexpected error.");
+     }
+     return defaultStats;
   }
 }
 
 // --- Fetch Recent Data (Optional helpers for dashboard lists) ---
 
 export async function getRecentExpenses(limit = 5) {
-   // Reset flags for this request
-   prismaInitializationFailed = false;
-   libsslErrorLogged = false;
+   // Reset flags for this request (though might inherit from parent if called sequentially)
+   // It's safer to rely on the checkPrismaInitError flags set within this request context
+   // prismaInitializationFailed = false;
+   // libsslErrorLogged = false;
 
    try {
      const expenses = await prisma.expense.findMany({
@@ -167,6 +168,7 @@ export async function getRecentExpenses(limit = 5) {
        if (checkPrismaInitError(error, 'getRecentExpenses')) {
             console.warn("Returning empty recent expenses list due to database connection failure.");
         } else {
+            // Log other errors if necessary
             console.error("[ACTION_ERROR] Error fetching recent expenses:", error);
        }
        return []; // Return empty array on any error
@@ -174,9 +176,9 @@ export async function getRecentExpenses(limit = 5) {
 }
 
 export async function getRecentInvoices(limit = 5) {
-   // Reset flags for this request
-   prismaInitializationFailed = false;
-   libsslErrorLogged = false;
+   // Reset flags for this request context
+   // prismaInitializationFailed = false;
+   // libsslErrorLogged = false;
 
    try {
      const invoices = await prisma.invoice.findMany({
@@ -193,6 +195,7 @@ export async function getRecentInvoices(limit = 5) {
        if (checkPrismaInitError(error, 'getRecentInvoices')) {
              console.warn("Returning empty recent invoices list due to database connection failure.");
         } else {
+            // Log other errors if necessary
              console.error("[ACTION_ERROR] Error fetching recent invoices:", error);
        }
       return []; // Return empty array on any error
