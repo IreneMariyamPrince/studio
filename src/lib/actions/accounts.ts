@@ -22,18 +22,21 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         description: account.description ?? undefined // Map null to undefined for zod optional
     }));
   } catch (error: unknown) {
-    // Log the error appropriately
     if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[ACTION_ERROR] Prisma Initialization Error fetching accounts:", error.message);
         // Add specific message about the underlying issue if known (like the libssl error)
-        console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+        if (error.message.includes('libssl')) {
+          console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+        }
+        // Return empty array to prevent breaking the page, but signal the error
+         throw new Error("Database connection failed. Please check server logs for details. Missing system libraries like 'libssl' might be the cause.");
     } else {
         // Log other types of errors
         console.error("[ACTION_ERROR] Error fetching accounts:", error);
+        // In a real app, handle this error more gracefully (e.g., return specific error object or throw)
+        // Returning empty array for now to avoid breaking the page, but ideally, signal the error upstream.
+        return []; // Keep returning empty array for non-init errors to avoid breaking UI completely
     }
-    // In a real app, handle this error more gracefully (e.g., return specific error object or throw)
-    // Returning empty array for now to avoid breaking the page, but ideally, signal the error upstream.
-    return [];
   }
 }
 
@@ -62,13 +65,6 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
   const { code, name, type, description } = validatedFields.data;
 
   try {
-    // No need to explicitly check for existing code if the DB schema has a unique constraint.
-    // Prisma will throw P2002 error which we can catch.
-    // const existingAccount = await prisma.account.findUnique({ where: { code } });
-    // if (existingAccount) {
-    //   return { success: false, message: `Account code "${code}" already exists.` };
-    // }
-
     const newAccount = await prisma.account.create({
       data: {
         code,
@@ -107,6 +103,14 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
       // Add handling for other relevant Prisma error codes if necessary
     } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account creation:", error.message);
+         if (error.message.includes('libssl')) {
+              console.error("Check if 'libssl' or 'openssl' is installed in the environment.");
+              return {
+                success: false,
+                message: 'Database Connection Error: Missing required system libraries (libssl).',
+                error: 'Initialization Error'
+             };
+         }
          return {
             success: false,
             message: 'Database Initialization Error: Could not connect to the database.',
@@ -153,9 +157,6 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
   const { id, code, name, type, description } = validatedFields.data;
 
   try {
-     // Prisma will handle the unique constraint check on 'code' during update
-     // We just need to catch the P2002 error if it occurs
-
     const updatedAccount = await prisma.account.update({
       where: { id },
       data: {
@@ -192,6 +193,14 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
         // Add handling for other relevant Prisma error codes if necessary
       } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account update:", error.message);
+          if (error.message.includes('libssl')) {
+              console.error("Check if 'libssl' or 'openssl' is installed in the environment.");
+              return {
+                success: false,
+                message: 'Database Connection Error: Missing required system libraries (libssl).',
+                error: 'Initialization Error'
+             };
+         }
          return {
             success: false,
             message: 'Database Initialization Error: Could not connect to the database.',
@@ -245,6 +254,14 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
         // Add handling for other relevant Prisma error codes if necessary
       } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account deletion:", error.message);
+          if (error.message.includes('libssl')) {
+              console.error("Check if 'libssl' or 'openssl' is installed in the environment.");
+              return {
+                success: false,
+                message: 'Database Connection Error: Missing required system libraries (libssl).',
+                error: 'Initialization Error'
+             };
+         }
          return {
             success: false,
             message: 'Database Initialization Error: Could not connect to the database.',
@@ -273,6 +290,11 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
   } catch (error: unknown) {
      if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error(`[ACTION_ERROR] Prisma Initialization Error fetching account with ID ${id}:`, error.message);
+        if (error.message.includes('libssl')) {
+          console.error("Check if 'libssl' or 'openssl' is installed in the environment.");
+        }
+        // Propagate the error to indicate failure
+        throw new Error("Database connection failed while fetching account. Missing system libraries like 'libssl' might be the cause.");
      } else {
         console.error(`[ACTION_ERROR] Error fetching account with ID ${id}:`, error);
      }
