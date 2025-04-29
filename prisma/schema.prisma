@@ -2,26 +2,32 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch"]
+  // Explicitly set the binary target to use OpenSSL 3.x if that's what the environment has
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL") // Make sure DATABASE_URL is set in your .env file
+  provider = "mysql" // Specify mysql
+  url      = env("DATABASE_URL")
 }
 
-// Chart of Accounts
+// --- Chart of Accounts ---
 model Account {
   id          String    @id @default(cuid())
-  code        String    @unique @db.VarChar(10) // Unique code for the account
-  name        String
+  code        String    @unique // e.g., 1010, 6050
+  name        String // e.g., Cash, Rent Expense
   type        AccountType // Asset, Liability, Equity, Revenue, Expense
-  description String?   @db.Text // Optional longer description
-  expenses    Expense[] // Relation to Expenses
+  description String? // Optional description
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  // Relations
+  expenses Expense[] // An account can be linked to many expenses
+
   @@index([type])
+  @@index([name])
 }
 
 enum AccountType {
@@ -32,80 +38,82 @@ enum AccountType {
   Expense
 }
 
-// Clients
-model Client {
-  id        String   @id @default(cuid())
-  name      String
-  email     String?  @unique // Optional but unique if provided
-  address   String?  @db.Text
-  invoices  Invoice[] // Relation to Invoices
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-// Invoices
-model Invoice {
-  id            String        @id @default(cuid())
-  invoiceNumber String        @unique // e.g., INV-001
-  clientId      String
-  client        Client        @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client if invoices exist
-  issueDate     DateTime      @db.Date // Date invoice was issued
-  dueDate       DateTime      @db.Date // Date invoice is due
-  status        InvoiceStatus // Draft, Pending, Paid, Overdue, Cancelled
-  notes         String?       @db.Text // Optional notes for the client
-  total         Float         // Calculated total amount
-  items         InvoiceItem[] // Relation to Invoice Items
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-
-  @@index([clientId])
-  @@index([status])
-  @@index([issueDate])
-}
-
-enum InvoiceStatus {
-  Draft
-  Pending
-  Paid
-  Overdue
-  Cancelled
-}
-
-// Invoice Items
-model InvoiceItem {
-  id          String  @id @default(cuid())
-  invoiceId   String
-  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Delete items if invoice is deleted
-  description String  @db.Text
-  quantity    Int
-  unitPrice   Float
-  total       Float   // quantity * unitPrice
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@index([invoiceId])
-}
-
-// Expenses
+// --- Expenses ---
 model Expense {
   id          String        @id @default(cuid())
-  date        DateTime      @db.Date // Date of the expense
-  accountId   String
-  account     Account       @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
-  amount      Float
-  description String?       @db.Text
-  receiptUrl  String?       // URL to the uploaded receipt image/pdf
-  status      ExpenseStatus // Pending, Approved, Rejected
+  date        DateTime // Date the expense occurred
+  accountId   String // Link to the Account (category)
+  account     Account       @relation(fields: [accountId], references: [id])
+  amount      Decimal       @db.Decimal(10, 2) // Store currency values accurately
+  description String? // Optional description
+  receiptUrl  String? // Optional URL to the receipt image/PDF
+  status      ExpenseStatus @default(Pending) // Status of the expense report/item
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  @@index([date])
   @@index([accountId])
   @@index([status])
-  @@index([date])
 }
 
 enum ExpenseStatus {
   Pending
   Approved
   Rejected
+}
+
+// --- Invoices ---
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique // e.g., INV-0001
+  clientId      String // Link to the Client
+  client        Client        @relation(fields: [clientId], references: [id])
+  issueDate     DateTime // Date the invoice was issued
+  dueDate       DateTime // Date the invoice is due
+  status        InvoiceStatus @default(Draft)
+  notes         String? // Optional notes for the client
+  total         Decimal       @db.Decimal(10, 2) // Total amount of the invoice
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items InvoiceItem[] // An invoice has multiple items
+
+  @@index([clientId])
+  @@index([status])
+  @@index([issueDate])
+  @@index([dueDate])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String // Link back to the Invoice
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Cascade delete items when invoice is deleted
+  description String
+  quantity    Int
+  unitPrice   Decimal @db.Decimal(10, 2)
+  total       Decimal @db.Decimal(10, 2) // quantity * unitPrice
+
+  @@index([invoiceId])
+}
+
+enum InvoiceStatus {
+  Draft
+  Pending // Sent but not paid
+  Paid
+  Overdue
+  Cancelled
+}
+
+// --- Clients ---
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?  @unique // Optional but unique if provided
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices Invoice[] // A client can have multiple invoices
+
+  @@index([name])
 }
