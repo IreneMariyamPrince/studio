@@ -1,7 +1,8 @@
+
 'use client';
 
 import type { FC, ReactNode } from 'react';
-import { useState } from 'react';
+import { useState } from 'react'; // Ensure useState is imported
 import {
   ResizableHandle,
   ResizablePanel,
