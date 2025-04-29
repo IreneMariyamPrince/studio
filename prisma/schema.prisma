@@ -7,28 +7,88 @@ generator client {
 
 datasource db {
   provider = "mysql"
-  url      = env("DATABASE_URL") // Ensure DATABASE_URL is set in your .env file
+  url      = env("DATABASE_URL")
 }
 
-// --- Core Financial Models ---
+// Represents an individual client company using the application
+model Tenant {
+  id          String   @id @default(cuid())
+  name        String   @unique // Name of the client company
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  settings    CompanySetting? // One-to-one relationship
+  users       User[]
+  accounts    Account[]
+  invoices    Invoice[]
+  expenses    Expense[]
+  clients     Client[] // Clients belonging to this tenant
+  vendors     Vendor[] // Vendors belonging to this tenant
+  payments    Payment[]
+  budgets     Budget[]
+  journalEntries JournalEntry[]
+  taxRates    TaxRate[]
+  bankAccounts BankAccount[]
+}
 
+// Tenant-specific company settings (e.g., logo, address)
+model CompanySetting {
+  id            String   @id @default(cuid())
+  tenantId      String   @unique // Each tenant has one settings entry
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  companyName   String?
+  logoUrl       String?
+  address       String?
+  // Add other company-specific fields as needed
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+
+model User {
+  id           String    @id @default(cuid())
+  firebaseUid  String?   @unique // Used if integrating with Firebase Auth
+  email        String    @unique
+  name         String?
+  role         UserRole  @default(Viewer)
+  isActive     Boolean   @default(true)
+  isSuperAdmin Boolean   @default(false) // Flag for super administrators
+  tenantId     String?   // Nullable for Super Admins, required for tenant users
+  tenant       Tenant?   @relation(fields: [tenantId], references: [id], onDelete: SetNull) // SetNull allows user to exist if tenant deleted (or handle differently)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  auditLogs    AuditLog[] // User who performed the action
+  journalEntries JournalEntry[] // User who created the entry
+}
+
+enum UserRole {
+  Admin     // Manages their tenant's settings and data
+  Accountant // Can perform accounting tasks within their tenant
+  Viewer    // Read-only access within their tenant
+  // SuperAdmin role is managed by isSuperAdmin flag
+}
+
+// Chart of Accounts
 model Account {
   id          String   @id @default(cuid())
-  code        String   @unique // e.g., 1010, 6050
-  name        String   // e.g., Cash, Office Supplies Expense
-  type        AccountType // Defined below
+  tenantId    String   // Foreign key to Tenant
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code        String   // Account code (e.g., "1010")
+  name        String   // Account name (e.g., "Cash")
+  type        AccountType
   description String?
-  balance     Decimal  @default(0.00) @db.Decimal(12, 2) // For Balance Sheet accounts
+  balance     Decimal  @default(0.00) @db.Decimal(12, 2) // Current balance (updated via transactions)
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Relations
-  expenses         Expense[] // Expenses categorized under this account
-  journalEntryLines JournalEntryLine[] // Journal entries affecting this account
-  budgets          Budget[] // Budgets set for this account
+  expenses           Expense[]
+  journalEntryLines  JournalEntryLine[]
+  budgets            Budget[] // Budgets associated with this account
+  bankAccounts       BankAccount[] // If mapping bank accounts directly to COA
+  // invoiceRevenueAccount Invoice[] @relation("RevenueAccount") // Removed direct relation, handle via Journal Entry
 
-  @@index([type])
+  @@unique([tenantId, code]) // Account code must be unique within a tenant
+  @@index([tenantId])
 }
 
 enum AccountType {
@@ -39,196 +99,215 @@ enum AccountType {
   Expense
 }
 
+// Invoices
 model Invoice {
-  id            String       @id @default(cuid())
-  invoiceNumber String       @unique // e.g., INV-0001
+  id            String   @id @default(cuid())
+  tenantId      String   // Foreign key to Tenant
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoiceNumber String   // Unique per tenant ideally, handled by logic
   clientId      String
+  client        Client   @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client with invoices
   issueDate     DateTime
   dueDate       DateTime
   status        InvoiceStatus @default(Draft)
-  total         Decimal      @db.Decimal(12, 2)
+  total         Decimal  @db.Decimal(12, 2)
   notes         String?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  revenueAccountId String? // Optional link to a specific revenue account
+  // revenueAccount Account? @relation("RevenueAccount", fields: [revenueAccountId], references: [id], onDelete: SetNull) // Removed direct relation
 
-  // Relations
-  client    Client         @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client if invoices exist
-  items     InvoiceItem[]
-  payments  Payment[] // Payments applied to this invoice
-  revenueAccountId String?  // Optional: Link to a specific Revenue account
-  revenueAccount Account? @relation("InvoiceRevenueAccount", fields: [revenueAccountId], references: [id], onDelete: SetNull)
+  items         InvoiceItem[]
+  payments      Payment[]
 
+  @@unique([tenantId, invoiceNumber]) // Invoice number unique within tenant
+  @@index([tenantId])
   @@index([clientId])
-  @@index([status])
-  @@index([issueDate])
-  @@index([dueDate])
+  @@index([revenueAccountId])
 }
 
 model InvoiceItem {
-  id          String   @id @default(cuid())
-  invoiceId   String
-  description String
-  quantity    Int
-  unitPrice   Decimal  @db.Decimal(10, 2)
-  total       Decimal  @db.Decimal(12, 2) // quantity * unitPrice (potentially + tax)
-  taxRateId   String?  // Optional link to TaxRate
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  // Relations
-  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Delete items if invoice is deleted
-  taxRate TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull)
+  id            String   @id @default(cuid())
+  invoiceId     String
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Cascade delete items with invoice
+  description   String
+  quantity      Int
+  unitPrice     Decimal  @db.Decimal(10, 2)
+  total         Decimal  @db.Decimal(12, 2) // Calculated: quantity * unitPrice + tax
+  taxRateId     String?
+  taxRate       TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull) // Allow item deletion if tax rate removed
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@index([invoiceId])
+  @@index([taxRateId])
 }
 
 enum InvoiceStatus {
   Draft
-  Pending // Sent, awaiting payment
+  Pending
   Paid
-  Partial // Partially paid
+  Partial
   Overdue
   Cancelled
 }
 
+// Expenses
 model Expense {
-  id          String        @id @default(cuid())
-  date        DateTime
-  accountId   String // Link to Expense account type in Chart of Accounts
-  amount      Decimal       @db.Decimal(12, 2)
-  description String?
-  receiptUrl  String? // URL from Firebase Storage
-  status      ExpenseStatus @default(Pending)
-  vendorId    String? // Link to Vendor
-  isRecurring Boolean       @default(false) // Flag for recurring expenses
-  recurrenceRule String?    // e.g., "FREQ=MONTHLY;INTERVAL=1" (iCalendar RRULE) - requires parsing logic
-  taxRateId   String?       // Optional link to TaxRate
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  id             String   @id @default(cuid())
+  tenantId       String   // Foreign key to Tenant
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  date           DateTime
+  accountId      String   // Link to Expense type account in COA
+  account        Account  @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account with expenses
+  amount         Decimal  @db.Decimal(12, 2)
+  description    String?
+  receiptUrl     String?  // URL to uploaded receipt in Firebase Storage
+  status         ExpenseStatus @default(Pending)
+  vendorId       String?
+  vendor         Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull) // Allow deleting vendor, keep expense
+  isRecurring    Boolean  @default(false)
+  recurrenceRule String?  // e.g., RRULE string for recurrence logic
+  taxRateId      String?
+  taxRate        TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull) // Allow deleting tax rate
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  // Relations
-  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
-  vendor  Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull) // Allow unsetting vendor
-  payments Payment[] // Payments made for this expense (if tracking vendor payments)
-  taxRate TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull)
+  payments       Payment[] // Payments made for this expense
 
+  @@index([tenantId])
   @@index([accountId])
-  @@index([date])
-  @@index([status])
   @@index([vendorId])
+  @@index([taxRateId])
 }
 
 enum ExpenseStatus {
   Pending
   Approved
   Rejected
-  Paid // If tracking payments against expenses
+  Paid
 }
 
-// --- Supporting Models ---
-
+// Clients
 model Client {
-  id           String    @id @default(cuid())
+  id           String   @id @default(cuid())
+  tenantId     String   // Foreign key to Tenant
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name         String
-  email        String?   @unique
+  email        String?  @unique // Optional: Enforce uniqueness if needed per tenant
   phone        String?
   address      String?
-  paymentTerms String?   // e.g., "Net 30"
-  balanceDue   Decimal   @default(0.00) @db.Decimal(12, 2) // Calculated field, maybe update via triggers or actions
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  paymentTerms String?  // e.g., "Net 30"
+  balanceDue   Decimal  @default(0.00) @db.Decimal(12, 2) // Calculated field
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  // Relations
-  invoices Invoice[]
+  invoices     Invoice[]
+
+  @@unique([tenantId, email]) // Email unique within tenant if not null
+  @@index([tenantId])
 }
 
+// Vendors
 model Vendor {
-  id           String    @id @default(cuid())
+  id           String   @id @default(cuid())
+  tenantId     String   // Foreign key to Tenant
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name         String
-  email        String?   @unique
+  email        String?  @unique // Optional: Enforce uniqueness if needed per tenant
   phone        String?
   address      String?
   paymentTerms String?
-  balanceOwed  Decimal   @default(0.00) @db.Decimal(12, 2) // Calculated field
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  balanceOwed  Decimal  @default(0.00) @db.Decimal(12, 2) // Calculated field
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  // Relations
-  expenses Expense[]
+  expenses     Expense[]
+
+  @@unique([tenantId, email]) // Email unique within tenant if not null
+  @@index([tenantId])
 }
 
+// Payments
 model Payment {
-  id             String        @id @default(cuid())
-  paymentDate    DateTime
-  amount         Decimal       @db.Decimal(12, 2)
-  paymentMethod  String // e.g., "Credit Card", "Bank Transfer", "Cash"
-  reference      String? // e.g., Check number, Transaction ID
-  notes          String?
-  bankAccountId  String // Account where payment was deposited/withdrawn
-  invoiceId      String? // If paying an invoice
-  expenseId      String? // If paying an expense (optional, depending on workflow)
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  id            String   @id @default(cuid())
+  tenantId      String   // Foreign key to Tenant
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  paymentDate   DateTime
+  amount        Decimal  @db.Decimal(12, 2)
+  paymentMethod String   // e.g., "Bank Transfer", "Credit Card", "Cash"
+  reference     String?  // Check number, transaction ID, etc.
+  notes         String?
+  bankAccountId String   // Account payment was made from/to
+  bankAccount   BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  invoiceId     String?  // Link if paying an invoice
+  invoice       Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull) // Allow deleting invoice, keep payment record
+  expenseId     String?  // Link if paying an expense
+  expense       Expense? @relation(fields: [expenseId], references: [id], onDelete: SetNull) // Allow deleting expense, keep payment record
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  // Relations
-  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
-  invoice     Invoice?    @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
-  expense     Expense?    @relation(fields: [expenseId], references: [id], onDelete: SetNull)
-
+  @@index([tenantId])
   @@index([bankAccountId])
   @@index([invoiceId])
   @@index([expenseId])
-  @@index([paymentDate])
 }
 
+// Bank Accounts (can be linked to COA Asset accounts)
 model BankAccount {
-  id            String    @id @default(cuid())
-  name          String // e.g., "Checking Account", "Savings Account"
-  accountNumber String? // Masked or partial number for identification
+  id            String   @id @default(cuid())
+  tenantId      String   // Foreign key to Tenant
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String   // e.g., "Checking Account", "Savings"
+  accountNumber String?  // Store masked or partial for security if needed
   bankName      String?
-  balance       Decimal   @default(0.00) @db.Decimal(12, 2)
-  currency      String    @default("USD") // Consider making this configurable
-  isDefault     Boolean   @default(false) // Maybe one default account
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  balance       Decimal  @default(0.00) @db.Decimal(12, 2) // Updated via payments/reconciliation
+  currency      String   @default("USD")
+  isDefault     Boolean  @default(false) // Is this the default account for payments?
+  coaAccountId  String?  // Optional link to a specific Asset account in COA
+  coaAccount    Account? @relation(fields: [coaAccountId], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  // Relations
-  payments Payment[] // Payments made from/to this account
-  // reconciliationLogs ReconciliationLog[] // Link to reconciliation logs (future feature)
+  payments      Payment[] // Payments made using this bank account
 
-  @@index([name])
+  @@index([tenantId])
+  @@index([coaAccountId])
 }
 
-// --- Double-Entry & Adjustments ---
+// Bank Reconciliation (Placeholder - structure depends on implementation)
+// model BankTransaction { ... }
+// model Reconciliation { ... }
 
+// Journal Entries
 model JournalEntry {
-  id           String    @id @default(cuid())
-  entryDate    DateTime
-  description  String
-  reference    String?   // Optional reference number
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  createdById  String?   // Link to User who created it
+  id          String   @id @default(cuid())
+  tenantId    String   // Foreign key to Tenant
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entryDate   DateTime
+  description String
+  reference   String?  // Optional reference number
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  createdById String?  // Link to user who created it
+  createdBy   User?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
-  // Relations
-  lines        JournalEntryLine[]
-  createdBy    User?      @relation("CreatedJournalEntries", fields: [createdById], references: [id], onDelete: SetNull)
+  lines       JournalEntryLine[]
 
-  @@index([entryDate])
+  @@index([tenantId])
+  @@index([createdById])
 }
 
 model JournalEntryLine {
   id             String     @id @default(cuid())
   journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
   accountId      String
-  type           EntryType // Debit or Credit
+  account        Account    @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account with journal entries
+  type           EntryType  // Debit or Credit
   amount         Decimal    @db.Decimal(12, 2)
-  description    String? // Optional line-specific description
+  description    String?    // Optional line-specific description
   createdAt      DateTime   @default(now())
-
-  // Relations
-  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
-  account      Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
   @@index([journalEntryId])
   @@index([accountId])
@@ -239,77 +318,55 @@ enum EntryType {
   Credit
 }
 
-// --- Planning & Control ---
-
+// Budgets
 model Budget {
-  id         String    @id @default(cuid())
-  accountId  String
-  period     String // e.g., "2024-01", "2024" (Yearly)
-  amount     Decimal   @db.Decimal(12, 2)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id        String   @id @default(cuid())
+  tenantId  String   // Foreign key to Tenant
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade) // Delete budget if account deleted
+  period    String   // e.g., "2024" or "2024-01" (YYYY or YYYY-MM)
+  amount    Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  // Relations
-  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
-
-  @@unique([accountId, period]) // Only one budget per account per period
+  @@unique([tenantId, accountId, period]) // Only one budget per account/period per tenant
+  @@index([tenantId])
   @@index([accountId])
-  @@index([period])
 }
 
-// --- User & Audit ---
-
-model User {
-  id            String       @id @default(cuid()) // Or use Firebase UID directly if preferred
-  firebaseUid   String?      @unique // Store Firebase UID for linking
-  email         String       @unique
-  name          String?
-  role          UserRole     @default(Viewer)
-  isActive      Boolean      @default(true)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-
-  // Relations
-  auditLogs          AuditLog[] @relation("UserAuditLogs")
-  createdJournalEntries JournalEntry[] @relation("CreatedJournalEntries")
-  // Add other relations like created invoices/expenses if needed
-}
-
-enum UserRole {
-  Admin
-  Accountant
-  Viewer
-}
-
-model AuditLog {
-  id        String    @id @default(cuid())
-  timestamp DateTime  @default(now())
-  userId    String?   // User performing the action
-  action    String // e.g., "create_invoice", "update_expense", "delete_account"
-  entity    String // e.g., "Invoice", "Expense", "Account"
-  entityId  String? // ID of the affected entity
-  details   Json? // Store old/new values or other context as JSON
-
-  // Relations
-  user User? @relation("UserAuditLogs", fields: [userId], references: [id], onDelete: SetNull)
-
-  @@index([timestamp])
-  @@index([userId])
-  @@index([entity, entityId])
-}
-
-// --- Configuration ---
-
+// Tax Rates
 model TaxRate {
   id          String   @id @default(cuid())
+  tenantId    String   // Foreign key to Tenant
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   name        String   // e.g., "VAT", "GST", "Sales Tax"
   ratePercent Decimal  @db.Decimal(5, 2) // e.g., 20.00 for 20%
   description String?
-  isDefault   Boolean  @default(false)
+  isDefault   Boolean  @default(false) // Is this the default tax rate for the tenant?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  // Relations
   invoiceItems InvoiceItem[]
   expenses     Expense[]
+
+  @@unique([tenantId, name]) // Tax rate names unique within tenant
+  @@index([tenantId])
+}
+
+// Audit Trail
+model AuditLog {
+  id        String   @id @default(cuid())
+  timestamp DateTime @default(now())
+  userId    String?  // User who performed the action (can be null for system actions)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String   // e.g., "create_invoice", "update_expense", "delete_account"
+  entity    String   // e.g., "Invoice", "Expense", "Account", "User", "Tenant"
+  entityId  String?  // ID of the affected entity
+  tenantId  String?  // ID of the tenant affected (important for filtering)
+  details   Json?    // Store old/new values, IP address, etc.
+
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([tenantId])
 }

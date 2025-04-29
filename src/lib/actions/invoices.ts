@@ -8,6 +8,7 @@ import { invoiceSchema, invoiceItemSchema, InvoiceSchema, invoiceFormSchema } fr
 import { clientSchema } from '@/lib/schemas/client';
 import { Prisma } from '@prisma/client'; // Import Prisma as a value
 import { accountSchema } from '@/lib/schemas/account';
+import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
 type ActionResult = {
@@ -18,67 +19,66 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Centralized flag to track if a critical init error occurred
-let prismaInitializationFailed = false;
-let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
-
-// Helper function to check and log Prisma init errors
+// Helper function to check and log Prisma init errors (assumes it exists or copy from other files)
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the flag
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         } else if (!error.message.includes('libssl')) {
-             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
-         }
-         return true; // Indicate an init error occurred
+         // Handle libssl error message specifically if needed
+         return true;
      }
-     return false; // Not an init error
+     return false;
 }
 
-// --- Invoice Actions ---
-
-// Helper to generate the next invoice number
-async function getNextInvoiceNumber(): Promise<string> {
-    const fallbackNumber = `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+// --- Invoice Number Generation (scoped per tenant) ---
+async function getNextInvoiceNumber(tenantId: string): Promise<string> {
+    const fallbackPrefix = `INV-${tenantId.substring(0, 4).toUpperCase()}-`;
+    const fallbackNumber = `${fallbackPrefix}${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
     try {
       const lastInvoice = await prisma.invoice.findFirst({
+        where: { tenantId: tenantId }, // Filter by tenant
         orderBy: { createdAt: 'desc' },
         select: { invoiceNumber: true },
       });
 
+      const prefix = `INV-`; // Standard prefix, tenant uniqueness handled by tenantId filter
+
       if (!lastInvoice || !lastInvoice.invoiceNumber) {
-        return 'INV-0001'; // Start with 4 digits
+        return `${prefix}0001`; // Start with 4 digits
       }
 
+      // Extract number part, assuming format like INV-XXXX
       const match = lastInvoice.invoiceNumber.match(/INV-(\d+)/);
+      let nextNum = 1;
       if (match && match[1]) {
-        const nextNum = parseInt(match[1], 10) + 1;
-        return `INV-${String(nextNum).padStart(4, '0')}`; // Pad to 4 digits
+        nextNum = parseInt(match[1], 10) + 1;
+      } else {
+          // Fallback if format is unexpected, count existing invoices for this tenant
+          console.warn(`Unexpected invoice number format found for tenant ${tenantId}. Generating next based on count.`);
+          const count = await prisma.invoice.count({ where: { tenantId: tenantId } });
+          nextNum = count + 1;
       }
-      console.warn("Unexpected invoice number format found. Generating fallback.");
-      const count = await prisma.invoice.count();
-      return `INV-${String(count + 1).padStart(4, '0')}`;
+      return `${prefix}${String(nextNum).padStart(4, '0')}`; // Pad to 4 digits
   } catch (error) {
-       if (checkPrismaInitError(error, 'getNextInvoiceNumber')) {
-            console.warn("Returning fallback invoice number due to database connection failure.");
+       if (checkPrismaInitError(error, `getNextInvoiceNumber (Tenant: ${tenantId})`)) {
+            console.warn(`Returning fallback invoice number for tenant ${tenantId} due to DB connection issue.`);
             return fallbackNumber;
        }
-      console.error("[HELPER_ERROR] Failed to get next invoice number:", error);
-      return fallbackNumber;
+      console.error(`[HELPER_ERROR] Failed to get next invoice number for tenant ${tenantId}:`, error);
+      return fallbackNumber; // Return fallback on other errors
   }
 }
 
-// --- Get Invoices ---
+// --- Get Invoices for the current tenant ---
 export async function getInvoices(): Promise<InvoiceSchema[]> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+    console.error("[ACTION_ERROR] Tenant ID not found in getInvoices.");
+    return [];
+  }
 
   try {
     const invoices = await prisma.invoice.findMany({
+      where: { tenantId: tenantId }, // Filter by tenant
       include: {
           client: { select: { id: true, name: true } }, // Select only needed client fields
           items: { // Include items with optional tax rate info
@@ -111,27 +111,29 @@ export async function getInvoices(): Promise<InvoiceSchema[]> {
      }));
 
   } catch (error) {
-      if (checkPrismaInitError(error, 'getInvoices')) {
-           console.warn("Returning empty invoices list due to database connection failure.");
+      if (checkPrismaInitError(error, `getInvoices (Tenant: ${tenantId})`)) {
+           console.warn(`Returning empty invoices list for tenant ${tenantId} due to database connection failure.`);
      } else {
-           console.error("[ACTION_ERROR] Error fetching invoices:", error);
+           console.error(`[ACTION_ERROR] Error fetching invoices for tenant ${tenantId}:`, error);
      }
        return [];
   }
 }
 
-// --- Get Invoice By ID ---
+// --- Get Invoice By ID (ensuring it belongs to the current tenant) ---
 export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+    console.error("[ACTION_ERROR] Tenant ID not found in getInvoiceById.");
+    return null;
+  }
 
   if (!id) return null;
   try {
     const invoice = await prisma.invoice.findUnique({
-      where: { id },
+      where: { id }, // ID is globally unique
        include: {
-          client: { select: { id: true, name: true, email: true, address: true, phone: true, paymentTerms: true, balanceDue: true, createdAt: true, updatedAt: true } }, // Fetch all needed client fields
+          client: true, // Fetch full client to parse later
           items: {
                include: {
                   taxRate: { select: { id: true, name: true, ratePercent: true } }
@@ -140,7 +142,11 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
           // revenueAccount: { select: { id: true, name: true, code: true } }
         },
     });
-     if (!invoice) return null;
+
+     if (!invoice || invoice.tenantId !== tenantId) {
+         // Not found or doesn't belong to the current tenant
+         return null;
+     }
 
      // Parse and return
      return invoiceSchema.parse({
@@ -149,14 +155,14 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
         issueDate: new Date(invoice.issueDate),
         dueDate: new Date(invoice.dueDate),
         notes: invoice.notes ?? undefined,
-        client: clientSchema.parse({ // Parse full client details
+        client: clientSchema.parse({ // Parse full client details after fetching
              ...invoice.client,
              email: invoice.client.email ?? undefined,
              address: invoice.client.address ?? undefined,
              phone: invoice.client.phone ?? undefined,
              paymentTerms: invoice.client.paymentTerms ?? undefined,
              balanceDue: invoice.client.balanceDue?.toNumber() ?? 0, // Handle Decimal
-             createdAt: invoice.client.createdAt,
+             createdAt: invoice.client.createdAt, // Ensure these are passed if needed by schema
              updatedAt: invoice.client.updatedAt,
         }),
         items: invoice.items.map(item => invoiceItemSchema.parse({
@@ -170,20 +176,21 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
          // revenueAccount: inv.revenueAccount ? accountSchema.parse(inv.revenueAccount) : undefined,
      });
   } catch (error) {
-       if (checkPrismaInitError(error, `getInvoiceById (${id})`)) {
-            console.warn(`Returning null for getInvoiceById(${id}) due to database connection failure.`);
+       if (checkPrismaInitError(error, `getInvoiceById (${id}, Tenant: ${tenantId})`)) {
+            console.warn(`Returning null for getInvoiceById(${id}, Tenant: ${tenantId}) due to database connection failure.`);
        } else {
-           console.error(`[ACTION_ERROR] Error fetching invoice ${id}:`, error);
+           console.error(`[ACTION_ERROR] Error fetching invoice ${id} for tenant ${tenantId}:`, error);
        }
     return null;
   }
 }
 
-// --- Create Invoice ---
+// --- Create Invoice for the current tenant ---
 export async function createInvoice(formData: FormData): Promise<ActionResult> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+    return { success: false, message: 'Tenant ID not found. Cannot create invoice.' };
+  }
 
    // 1. Validate basic invoice fields
    const basicInvoiceData = {
@@ -206,9 +213,30 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
 
     if (!basicValidation.success) {
         const fieldErrors = basicValidation.error.flatten().fieldErrors;
-        console.error("[VALIDATION_ERROR] createInvoice (basic):", fieldErrors);
+        console.error(`[VALIDATION_ERROR] createInvoice (basic, Tenant: ${tenantId}):`, fieldErrors);
         return { success: false, message: 'Basic invoice validation failed.', error: "Validation Error", fieldErrors };
     }
+
+    // Ensure the selected client belongs to the current tenant
+    const selectedClientId = basicValidation.data.clientId;
+    try {
+        const client = await prisma.client.findUnique({ where: { id: selectedClientId }, select: { tenantId: true } });
+        if (!client || client.tenantId !== tenantId) {
+            return { success: false, message: "Invalid client selected for this tenant.", fieldErrors: { clientId: ["Invalid client selected."] } };
+        }
+        // Also validate revenueAccount if provided
+        const selectedRevenueAccountId = basicValidation.data.revenueAccountId;
+        if (selectedRevenueAccountId) {
+             const account = await prisma.account.findUnique({ where: { id: selectedRevenueAccountId }, select: { tenantId: true, type: true } });
+             if (!account || account.tenantId !== tenantId || account.type !== 'Revenue') {
+                  return { success: false, message: "Invalid revenue account selected.", fieldErrors: { revenueAccountId: ["Invalid revenue account."] } };
+             }
+        }
+    } catch (error) {
+        console.error(`[DB_ERROR] Error validating client/account for tenant ${tenantId} during invoice creation:`, error);
+        return { success: false, message: 'Database error during validation.' };
+    }
+
 
     // 2. Parse and validate items from JSON string
    const itemsJson = formData.get('items') as string;
@@ -220,12 +248,11 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
          throw new Error("Invoice must have at least one item.");
      }
    } catch (error) {
-     console.error("[VALIDATION_ERROR] createInvoice (items JSON parsing):", error);
+     console.error(`[VALIDATION_ERROR] createInvoice (items JSON, Tenant: ${tenantId}):`, error);
      return { success: false, message: 'Invalid invoice items data format.', error: "Validation Error", fieldErrors: { items: ['Invalid items format or missing items.'] } };
    }
 
-   // Fetch Tax Rates needed for calculation (optional, could be passed or fetched once)
-   // const taxRatesMap = await getTaxRatesMap(); // Helper to fetch tax rates by ID
+   // TODO: Validate taxRateId belongs to the tenant if provided
 
    // Validate each item, calculate total, and prepare data for creation
    const validatedItemsData: Prisma.InvoiceItemCreateWithoutInvoiceInput[] = [];
@@ -234,40 +261,35 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
 
    for (let i = 0; i < parsedItems.length; i++) {
        const item = parsedItems[i];
-        // Validate using a schema subset for item creation data
        const itemValidation = invoiceItemSchema.pick({ description: true, quantity: true, unitPrice: true, taxRateId: true }).safeParse({
            description: item.description,
            quantity: parseInt(item.quantity, 10),
            unitPrice: parseFloat(item.unitPrice),
-           taxRateId: item.taxRateId || undefined, // Handle optional tax rate
+           taxRateId: item.taxRateId || undefined,
        });
 
        if (!itemValidation.success) {
-            const errors = itemValidation.error.flatten().fieldErrors;
+           // ... (error handling as before)
+           const errors = itemValidation.error.flatten().fieldErrors;
             Object.values(errors).flat().forEach(errMsg => itemErrors.push(`Item ${i+1}: ${errMsg}`));
        } else {
            const validItemData = itemValidation.data;
            const itemSubtotal = validItemData.quantity * validItemData.unitPrice;
-           let itemTax = 0;
-           // TODO: Calculate tax based on taxRateId if provided and tax rates fetched
-           // if (validItemData.taxRateId && taxRatesMap[validItemData.taxRateId]) {
-           //     itemTax = itemSubtotal * (taxRatesMap[validItemData.taxRateId] / 100);
-           // }
-           const itemTotal = itemSubtotal + itemTax; // Add tax to item total
-
+           // TODO: Add tax calculation logic here if taxRateId is present and valid for the tenant
+           const itemTotal = itemSubtotal; // Update with tax later
            validatedItemsData.push({
                description: validItemData.description,
                quantity: validItemData.quantity,
                unitPrice: validItemData.unitPrice,
                taxRateId: validItemData.taxRateId,
-               total: itemTotal, // Store calculated total including tax
+               total: itemTotal,
            });
-            calculatedTotal += itemTotal; // Add item total to invoice total
+            calculatedTotal += itemTotal;
        }
    }
 
     if (itemErrors.length > 0) {
-        console.error("[VALIDATION_ERROR] createInvoice (items validation):", itemErrors);
+        console.error(`[VALIDATION_ERROR] createInvoice (items, Tenant: ${tenantId}):`, itemErrors);
         return { success: false, message: 'Invoice items validation failed.', error: "Validation Error", fieldErrors: { items: itemErrors } };
     }
 
@@ -275,11 +297,12 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
   const { clientId, issueDate, dueDate, status, notes, revenueAccountId } = basicValidation.data;
 
   try {
-     const invoiceNumber = await getNextInvoiceNumber();
+     const invoiceNumber = await getNextInvoiceNumber(tenantId); // Pass tenantId
 
      // Create invoice and items within a transaction
      const createdInvoice = await prisma.invoice.create({
         data: {
+            tenantId: tenantId, // Set tenant ID
             invoiceNumber,
             clientId,
             issueDate,
@@ -295,31 +318,24 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
         include: { items: true, client: true }, // Include relations in the response
      });
 
-      // TODO: Optional - Create corresponding Journal Entry if status is not Draft
-      // if (status !== 'Draft') {
-      //    await createJournalEntryForInvoice(createdInvoice); // Implement this helper
-      // }
-
     revalidatePath('/invoices');
     revalidatePath(`/invoices/${createdInvoice.id}`);
     revalidatePath('/dashboard');
     return { success: true, message: `Invoice ${createdInvoice.invoiceNumber} created.`, data: createdInvoice };
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, 'createInvoice')) {
+    if (checkPrismaInitError(error, `createInvoice (Tenant: ${tenantId})`)) {
         return { success: false, message: 'Database Connection Error. Failed to create invoice.', error: 'Initialization Error' };
     }
-    console.error("[DB_ERROR] Failed to create invoice:", error);
+    console.error(`[DB_ERROR] Failed to create invoice for tenant ${tenantId}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-         // Foreign key constraint (e.g., invalid clientId, revenueAccountId)
+         // Foreign key constraint (e.g., invalid clientId, revenueAccountId - checked earlier but catch here too)
          if (error.code === 'P2003') {
              const fieldName = (error.meta?.field_name as string) || 'related record';
              let userMessage = `Database Error: Invalid ${fieldName}. Record not found.`;
-             let fieldKey: keyof InvoiceFormSchema | undefined;
-             if (fieldName.includes('clientId')) { userMessage = 'Invalid client selected.'; fieldKey = 'clientId'; }
-             if (fieldName.includes('revenueAccountId')) { userMessage = 'Invalid revenue account selected.'; fieldKey = 'revenueAccountId'; }
-            return { success: false, message: userMessage, error: error.code, fieldErrors: fieldKey ? { [fieldKey]: [userMessage] } : undefined };
+            return { success: false, message: userMessage, error: error.code };
          }
-          if (error.code === 'P2002') { // Unique constraint (invoiceNumber)
+          // Unique constraint (tenantId, invoiceNumber)
+          if (error.code === 'P2002') {
              return { success: false, message: 'Database Error: Failed to generate unique invoice number. Please try again.', error: error.code };
           }
      }
@@ -329,29 +345,52 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
 
 // --- Update Invoice ---
 export async function updateInvoice(formData: FormData): Promise<ActionResult> {
-  // Placeholder: Complex logic involving updating items (delete old, create new), recalculating total, potentially updating journal entries.
-   console.log("Update invoice action called (Not Implemented)", Object.fromEntries(formData.entries()));
+   const tenantId = await getTenantId();
+   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
    const invoiceId = formData.get('id') as string;
    if (!invoiceId) return { success: false, message: "Invoice ID missing." };
-   // Validation, Transaction logic for update, Revalidation...
-  return { success: false, message: 'Update Invoice - Not Implemented Yet (Requires Complex Transaction Logic)' };
+
+    // 1. Verify invoice belongs to the tenant
+    try {
+        const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { tenantId: true } });
+        if (!invoice) return { success: false, message: 'Invoice not found.' };
+        if (invoice.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+    } catch (error) {
+        // Handle DB error
+        return { success: false, message: 'Database error verifying invoice ownership.' };
+    }
+
+   // 2. Perform validation similar to createInvoice (basic fields, items, client/account ownership)
+   // ...
+
+   // 3. Use a transaction to:
+   //    a. Delete existing items for this invoice.
+   //    b. Create new items based on validated form data.
+   //    c. Update the invoice header data (client, dates, status, notes, *recalculated total*).
+   //    d. Potentially update related Journal Entries.
+
+  console.warn("Update Invoice - Not fully implemented yet (Requires Complex Transaction Logic)");
+  return { success: false, message: 'Update Invoice - Not Implemented Yet' };
 }
 
 // --- Delete Invoice ---
 export async function deleteInvoice(id: string): Promise<ActionResult> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
-
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+    return { success: false, message: 'Tenant ID not found.' };
+  }
   if (!id) return { success: false, message: 'Invoice ID is required.' };
 
   try {
-     // Check if invoice exists
+     // Check if invoice exists and belongs to the tenant
      const invoice = await prisma.invoice.findUnique({
           where: { id },
-          select: { id: true, status: true } // Check status if needed (e.g., prevent deleting Paid invoices)
+          select: { id: true, status: true, tenantId: true } // Include tenantId
         });
+
      if (!invoice) return { success: false, message: 'Invoice not found.', error: 'P2025' };
+     if (invoice.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+
 
      // TODO: Add business logic checks (e.g., cannot delete if payments exist?)
      // const paymentsCount = await prisma.payment.count({ where: { invoiceId: id } });
@@ -366,10 +405,10 @@ export async function deleteInvoice(id: string): Promise<ActionResult> {
     revalidatePath('/dashboard');
     return { success: true, message: 'Invoice deleted successfully.' };
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, 'deleteInvoice')) {
+    if (checkPrismaInitError(error, `deleteInvoice (${id}, Tenant: ${tenantId})`)) {
         return { success: false, message: 'Database Connection Error. Failed to delete invoice.', error: 'Initialization Error' };
     }
-     console.error("[DB_ERROR] Failed to delete invoice:", error);
+     console.error(`[DB_ERROR] Failed to delete invoice ${id} for tenant ${tenantId}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
          return { success: false, message: 'Invoice not found.', error: error.code };
      }

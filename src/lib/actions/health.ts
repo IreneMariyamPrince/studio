@@ -18,37 +18,30 @@ type DbStatusResult = {
 export async function checkDbConnection(): Promise<DbStatusResult> {
   try {
     // Attempt a very lightweight query to check connectivity.
-    // Using $queryRaw`SELECT 1` is generally efficient.
     await prisma.$queryRaw`SELECT 1`;
     return { connected: true, error: null };
   } catch (error: unknown) {
-    let errorMessage: string | null = 'Unknown error';
+    let errorMessage: string | null = 'Unknown database error occurred.';
+    let logMessage: string = 'Unknown error type';
 
     if (error instanceof Prisma.PrismaClientInitializationError) {
-      errorMessage = `Prisma Initialization Error: ${error.message}. Code: ${error.errorCode}`;
-      // Log specific details for server-side debugging
-      console.error(`[DB_HEALTH_CHECK_ERROR] ${errorMessage}`);
+      logMessage = `Prisma Initialization Error: ${error.message}. Code: ${error.errorCode}`;
        // Provide more specific user-facing hint if it's the libssl issue
        if (error.message.includes('libssl')) {
-            errorMessage = "Connection failed: Missing required system libraries (libssl). Check environment.";
+            errorMessage = "Connection failed: Missing required system libraries (e.g., libssl). Check server environment and Prisma documentation.";
        } else {
-            errorMessage = "Connection failed: Could not initialize database connection. Check server logs.";
+            errorMessage = "Connection failed: Could not initialize database connection. Check connection string and database server status.";
        }
-
     } else if (error instanceof Error) {
-      errorMessage = `Generic Error: ${error.message}`;
-       console.error(`[DB_HEALTH_CHECK_ERROR] ${errorMessage}`);
-        errorMessage = "Connection failed: An unexpected error occurred."; // Generic message for client
+      logMessage = `Generic Error: ${error.message}`;
+      errorMessage = "Connection failed: An unexpected error occurred while connecting to the database.";
     } else {
-      console.error("[DB_HEALTH_CHECK_ERROR] Unknown error type:", error);
-       errorMessage = "Connection failed due to an unknown error.";
+      logMessage = `Unknown error type: ${String(error)}`;
+      errorMessage = "Connection failed due to an unknown error.";
     }
 
-    return { connected: false, error: errorMessage };
-  } finally {
-     // Although Prisma manages connections, explicitly disconnecting
-     // might be considered in a standalone health check script,
-     // but generally not needed within Next.js actions using the shared instance.
-     // await prisma.$disconnect(); // Typically not required here
+    console.error(`[DB_HEALTH_CHECK_ERROR] ${logMessage}`); // Log detailed error server-side
+    return { connected: false, error: errorMessage }; // Return user-friendly message
   }
+  // No finally block needed as Prisma manages connections in the pool.
 }

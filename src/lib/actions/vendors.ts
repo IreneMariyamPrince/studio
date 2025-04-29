@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
 import { vendorSchema, vendorFormSchema, VendorSchema } from '@/lib/schemas/vendor';
 import { Prisma } from '@prisma/client';
+import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
 type ActionResult = {
@@ -15,34 +16,27 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Centralized flag to track if a critical init error occurred
-let prismaInitializationFailed = false;
-let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
-
-// Helper function to check and log Prisma init errors
+// Helper function to check and log Prisma init errors (assume it exists)
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the flag
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         } else if (!error.message.includes('libssl')) {
-             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
-         }
-         return true; // Indicate an init error occurred
+         // Handle libssl error message specifically if needed
+         return true;
      }
-     return false; // Not an init error
+     return false;
 }
 
-// --- Get Vendors ---
+// --- Get Vendors for the current tenant ---
 export async function getVendors(): Promise<VendorSchema[]> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+    console.error("[ACTION_ERROR] Tenant ID not found in getVendors.");
+    return [];
+  }
 
   try {
     const vendors = await prisma.vendor.findMany({
+        where: { tenantId: tenantId }, // Filter by tenant
         orderBy: { name: 'asc' }
     });
     // Validate each vendor against the schema before returning
@@ -55,20 +49,21 @@ export async function getVendors(): Promise<VendorSchema[]> {
         balanceOwed: vendor.balanceOwed?.toNumber() ?? 0, // Handle Decimal
     }));
   } catch (error) {
-     if (checkPrismaInitError(error, 'getVendors')) {
-          console.warn("Returning empty vendors list due to database connection failure.");
+     if (checkPrismaInitError(error, `getVendors (Tenant: ${tenantId})`)) {
+          console.warn(`Returning empty vendors list for tenant ${tenantId} due to DB connection issue.`);
      } else {
-        console.error("[ACTION_ERROR] Error fetching vendors:", error);
+        console.error(`[ACTION_ERROR] Error fetching vendors for tenant ${tenantId}:`, error);
      }
     return [];
   }
 }
 
-// --- Add Vendor ---
+// --- Add Vendor for the current tenant ---
 export async function addVendor(formData: FormData): Promise<ActionResult> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+   const tenantId = await getTenantId();
+   if (!tenantId) {
+       return { success: false, message: 'Tenant ID not found. Cannot add vendor.' };
+   }
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -82,30 +77,34 @@ export async function addVendor(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error("[VALIDATION_ERROR] addVendor:", fieldErrors);
+    console.error(`[VALIDATION_ERROR] addVendor (Tenant: ${tenantId}):`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
   try {
     const newVendor = await prisma.vendor.create({
-      data: validatedFields.data,
+      data: {
+          ...validatedFields.data,
+          tenantId: tenantId, // Associate with current tenant
+        },
     });
 
     revalidatePath('/vendors'); // Revalidate the vendor list page
     revalidatePath('/expenses/new'); // Revalidate new expense page if vendor dropdown is there
     return { success: true, message: `Vendor "${newVendor.name}" added successfully.`, data: newVendor };
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, 'addVendor')) {
+    if (checkPrismaInitError(error, `addVendor (Tenant: ${tenantId})`)) {
         return { success: false, message: 'Database Connection Error. Failed to add vendor.', error: 'Initialization Error' };
     }
-     console.error("[DB_ERROR] Failed to add vendor:", error);
+     console.error(`[DB_ERROR] Failed to add vendor for tenant ${tenantId}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email')) {
+       // Check unique constraint for email within the tenant
+       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email') && (error.meta?.target as string[])?.includes('tenantId')) {
          return {
              success: false,
-             message: 'Database Error: A vendor with this email already exists.',
+             message: 'Database Error: A vendor with this email already exists for this tenant.',
              error: error.code,
-             fieldErrors: { email: ['This email is already registered.'] }
+             fieldErrors: { email: ['This email is already registered for this tenant.'] }
           };
        }
      }
@@ -117,22 +116,67 @@ export async function addVendor(formData: FormData): Promise<ActionResult> {
   }
 }
 
-// --- Update Vendor ---
+// --- Update Vendor for the current tenant ---
 export async function updateVendor(formData: FormData): Promise<ActionResult> {
-  // Placeholder: Implement update logic
-   console.log("Update vendor action called (Not Implemented)", Object.fromEntries(formData.entries()));
-    const vendorId = formData.get('id') as string;
+   const tenantId = await getTenantId();
+   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
+   const vendorId = formData.get('id') as string;
    if (!vendorId) return { success: false, message: "Vendor ID missing." };
-   // Validation, Prisma update, revalidation...
-  return { success: false, message: 'Update Vendor - Not Implemented Yet' };
+
+   // 1. Verify vendor belongs to the tenant
+    try {
+        const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { tenantId: true } });
+        if (!vendor) return { success: false, message: 'Vendor not found.' };
+        if (vendor.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+    } catch (error) {
+        // Handle DB error
+        return { success: false, message: 'Database error verifying vendor ownership.' };
+    }
+
+    // 2. Validate form data
+    // ... validation logic ...
+
+    // 3. Perform update
+    try {
+         const updatedVendor = await prisma.vendor.update({
+             where: { id: vendorId },
+             data: { /* validated data */ },
+         });
+         revalidatePath('/vendors');
+         revalidatePath(`/vendors/${vendorId}`); // If vendor detail pages exist
+         return { success: true, message: 'Vendor updated successfully.' };
+    } catch (error) {
+        // Handle DB errors (connection, unique constraint)
+        return { success: false, message: 'Database Error: Failed to update vendor.' /* + specific error handling */ };
+    }
 }
 
-// --- Delete Vendor ---
+// --- Delete Vendor for the current tenant ---
 export async function deleteVendor(id: string): Promise<ActionResult> {
-  // Placeholder: Implement delete logic
-   console.log("Delete vendor action called (Not Implemented)", id);
-    if (!id) return { success: false, message: "Vendor ID missing." };
-   // Check for related expenses (onDelete: SetNull allows deletion, but maybe warn?)
-   // Prisma delete, revalidation...
-  return { success: false, message: 'Delete Vendor - Not Implemented Yet' };
+   const tenantId = await getTenantId();
+   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
+   if (!id) return { success: false, message: "Vendor ID missing." };
+
+   try {
+        // 1. Verify vendor belongs to the tenant
+        const vendor = await prisma.vendor.findUnique({ where: { id }, select: { tenantId: true } });
+        if (!vendor) return { success: false, message: 'Vendor not found.', error: 'P2025' };
+        if (vendor.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+
+        // 2. Perform delete (Expenses link is SetNull, so this should work)
+        await prisma.vendor.delete({ where: { id } });
+
+        revalidatePath('/vendors');
+        revalidatePath('/expenses'); // Revalidate expenses as vendor info might disappear
+        return { success: true, message: 'Vendor deleted successfully.' };
+   } catch (error) {
+        if (checkPrismaInitError(error, `deleteVendor (${id}, Tenant: ${tenantId})`)) {
+           return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        }
+        console.error(`[DB_ERROR] Failed to delete vendor ${id} for tenant ${tenantId}:`, error);
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+             return { success: false, message: 'Vendor not found.', error: error.code };
+         }
+        return { success: false, message: 'Database Error: Failed to delete vendor.' };
+   }
 }

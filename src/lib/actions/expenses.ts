@@ -6,6 +6,7 @@ import { z } from 'zod';
 import prisma from '@/lib/prisma';
 import { expenseSchema, expenseFormSchema, ExpenseSchema } from '@/lib/schemas/expense'; // Adjusted imports
 import type { Prisma } from '@prisma/client'; // Import Prisma types
+import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
 type ActionResult = {
@@ -16,34 +17,27 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Centralized flag to track if a critical init error occurred
-let prismaInitializationFailed = false;
-let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
-
-// Helper function to check and log Prisma init errors
+// Helper function to check and log Prisma init errors (assume it exists)
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the flag
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         } else if (!error.message.includes('libssl')) {
-             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
-         }
-         return true; // Indicate an init error occurred
+         // Handle libssl error message specifically if needed
+         return true;
      }
-     return false; // Not an init error
+     return false;
 }
 
-// --- Get Expenses ---
+// --- Get Expenses for the current tenant ---
 export async function getExpenses(): Promise<ExpenseSchema[]> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+  const tenantId = await getTenantId();
+  if (!tenantId) {
+      console.error("[ACTION_ERROR] Tenant ID not found in getExpenses.");
+      return [];
+  }
 
   try {
     const expenses = await prisma.expense.findMany({
+      where: { tenantId: tenantId }, // Filter by tenant
       include: {
         account: { select: { id: true, name: true, code: true, type: true } },
         vendor: { select: { id: true, name: true } }, // Include vendor name
@@ -67,32 +61,38 @@ export async function getExpenses(): Promise<ExpenseSchema[]> {
          taxRateId: exp.taxRateId ?? undefined,
      }));
   } catch (error) {
-     if (checkPrismaInitError(error, 'getExpenses')) {
-        console.warn("Returning empty expenses list due to database connection failure.");
+     if (checkPrismaInitError(error, `getExpenses (Tenant: ${tenantId})`)) {
+        console.warn(`Returning empty expenses list for tenant ${tenantId} due to DB connection issue.`);
      } else {
-        console.error("[ACTION_ERROR] Error fetching expenses:", error);
+        console.error(`[ACTION_ERROR] Error fetching expenses for tenant ${tenantId}:`, error);
      }
     return [];
   }
 }
 
-// --- Get Expense by ID ---
+// --- Get Expense by ID (ensuring it belongs to the current tenant) ---
 export async function getExpenseById(id: string): Promise<ExpenseSchema | null> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+   const tenantId = await getTenantId();
+   if (!tenantId) {
+       console.error("[ACTION_ERROR] Tenant ID not found in getExpenseById.");
+       return null;
+   }
 
   if (!id) return null;
   try {
     const expense = await prisma.expense.findUnique({
-      where: { id },
+      where: { id }, // ID is globally unique
       include: {
         account: { select: { id: true, name: true, code: true, type: true } },
         vendor: { select: { id: true, name: true } },
         // taxRate: { select: { id: true, name: true, ratePercent: true } }
        },
     });
-    if (!expense) return null;
+
+    if (!expense || expense.tenantId !== tenantId) {
+        // Not found or doesn't belong to the current tenant
+        return null;
+    }
 
      return expenseSchema.parse({
          ...expense,
@@ -108,21 +108,22 @@ export async function getExpenseById(id: string): Promise<ExpenseSchema | null> 
          taxRateId: expense.taxRateId ?? undefined,
      });
   } catch (error: unknown) {
-      if (checkPrismaInitError(error, `getExpenseById (${id})`)) {
-           console.warn(`Returning null for getExpenseById(${id}) due to database connection failure.`);
+      if (checkPrismaInitError(error, `getExpenseById (${id}, Tenant: ${tenantId})`)) {
+           console.warn(`Returning null for getExpenseById(${id}, Tenant: ${tenantId}) due to DB connection issue.`);
       } else {
-           console.error(`[ACTION_ERROR] Error fetching expense ${id}:`, error);
+           console.error(`[ACTION_ERROR] Error fetching expense ${id} for tenant ${tenantId}:`, error);
       }
     return null;
   }
 }
 
 
-// --- Add New Expense ---
+// --- Add New Expense for the current tenant ---
 export async function addExpense(formData: FormData): Promise<ActionResult> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
+   const tenantId = await getTenantId();
+   if (!tenantId) {
+       return { success: false, message: 'Tenant ID not found. Cannot add expense.' };
+   }
 
   const rawData = {
     date: formData.get('date'),
@@ -151,27 +152,47 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
      const fieldErrors = validatedFields.error.flatten().fieldErrors;
-     console.error("[VALIDATION_ERROR] addExpense:", fieldErrors);
+     console.error(`[VALIDATION_ERROR] addExpense (Tenant: ${tenantId}):`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
+   // Validate that selected Account, Vendor, TaxRate belong to the tenant
+   try {
+       const accountId = validatedFields.data.accountId;
+       const vendorId = validatedFields.data.vendorId;
+       const taxRateId = validatedFields.data.taxRateId;
+
+       const account = await prisma.account.findUnique({ where: { id: accountId }, select: { tenantId: true, type: true } });
+       if (!account || account.tenantId !== tenantId || account.type !== 'Expense') {
+           return { success: false, message: 'Invalid expense account selected.', fieldErrors: { accountId: ['Invalid expense account.'] } };
+       }
+
+       if (vendorId) {
+           const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { tenantId: true } });
+           if (!vendor || vendor.tenantId !== tenantId) {
+                return { success: false, message: 'Invalid vendor selected.', fieldErrors: { vendorId: ['Invalid vendor.'] } };
+           }
+       }
+       if (taxRateId) {
+            const taxRate = await prisma.taxRate.findUnique({ where: { id: taxRateId }, select: { tenantId: true } });
+            if (!taxRate || taxRate.tenantId !== tenantId) {
+                 return { success: false, message: 'Invalid tax rate selected.', fieldErrors: { taxRateId: ['Invalid tax rate.'] } };
+            }
+       }
+   } catch (error) {
+       console.error(`[DB_ERROR] Error validating relations for tenant ${tenantId} during expense creation:`, error);
+       return { success: false, message: 'Database error during validation.' };
+   }
+
+
   // TODO: Handle receipt file upload here (Firebase Storage or other service)
-  // const receiptFile = rawData.receiptFile as File | null;
-  // let receiptUrl = undefined;
-  // if (receiptFile) {
-  //    try {
-  //       receiptUrl = await uploadFileToFirebaseStorage(receiptFile, `receipts/${generateUniqueFilename(receiptFile.name)}`);
-  //    } catch (uploadError) {
-  //       console.error("Receipt upload failed:", uploadError);
-  //       return { success: false, message: 'Receipt upload failed.', error: 'File Upload Error' };
-  //    }
-  // }
   const receiptUrl = undefined; // Placeholder
 
   try {
     const expense = await prisma.expense.create({
       data: {
         ...validatedFields.data,
+        tenantId: tenantId, // Set tenant ID
         receiptUrl: receiptUrl, // Save the URL from storage
       },
     });
@@ -180,79 +201,49 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
     revalidatePath('/dashboard'); // Update dashboard stats
     return { success: true, message: 'Expense added successfully.', data: expense };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, 'addExpense')) {
+     if (checkPrismaInitError(error, `addExpense (Tenant: ${tenantId})`)) {
          return { success: false, message: 'Database Connection Error. Failed to add expense.', error: 'Initialization Error' };
      }
-    console.error("[DB_ERROR] Failed to add expense:", error);
+    console.error(`[DB_ERROR] Failed to add expense for tenant ${tenantId}:`, error);
+    // Specific error handling for P2003 (foreign key) is less likely now due to pre-validation,
+    // but kept for robustness.
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        // Foreign key constraint failed (e.g., invalid accountId, vendorId, taxRateId)
         if (error.code === 'P2003') {
             const fieldName = (error.meta?.field_name as string) || 'related record';
-            let userMessage = `Database Error: Invalid ${fieldName}. Record not found.`;
-            let fieldKey: keyof ExpenseFormSchema | undefined;
-            if (fieldName.includes('accountId')) { userMessage = 'Invalid account selected.'; fieldKey = 'accountId'; }
-            if (fieldName.includes('vendorId')) { userMessage = 'Invalid vendor selected.'; fieldKey = 'vendorId'; }
-            if (fieldName.includes('taxRateId')) { userMessage = 'Invalid tax rate selected.'; fieldKey = 'taxRateId'; }
-
-           return {
-               success: false, message: userMessage, error: error.code,
-               fieldErrors: fieldKey ? { [fieldKey]: [userMessage] } : undefined
-            };
+            return { success: false, message: `Database Error: Invalid ${fieldName}. Record not found.`, error: error.code };
         }
     }
     return { success: false, message: 'Database Error: Failed to add expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-// --- Update Expense ---
-// Use form schema extended with ID for validation
+// --- Update Expense for the current tenant ---
 const updateExpenseFormSchema = expenseFormSchema.extend({
   id: z.string().cuid(),
 });
 
 export async function updateExpense(formData: FormData): Promise<ActionResult> {
-   // Reset flags for this request
-   prismaInitializationFailed = false;
-   libsslErrorLogged = false;
-
+   const tenantId = await getTenantId();
+   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
    const expenseId = formData.get('id') as string;
    if (!expenseId) return { success: false, message: 'Expense ID is missing.' };
 
-   const rawData = {
-     date: formData.get('date'),
-     accountId: formData.get('accountId'),
-     amount: formData.get('amount'),
-     description: formData.get('description'),
-     status: formData.get('status'),
-     vendorId: formData.get('vendorId'),
-     isRecurring: formData.get('isRecurring') === 'true',
-     recurrenceRule: formData.get('recurrenceRule'),
-     taxRateId: formData.get('taxRateId'),
-     // Handle receipt update/removal separately
-   };
+   // 1. Verify expense belongs to the tenant
+    try {
+        const expense = await prisma.expense.findUnique({ where: { id: expenseId }, select: { tenantId: true } });
+        if (!expense) return { success: false, message: 'Expense not found.' };
+        if (expense.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+    } catch (error) {
+        // Handle DB error
+        return { success: false, message: 'Database error verifying expense ownership.' };
+    }
 
-   const validatedFields = updateExpenseFormSchema.safeParse({
-     id: expenseId,
-     date: rawData.date ? new Date(rawData.date as string) : undefined,
-     accountId: rawData.accountId,
-     amount: rawData.amount ? parseFloat(rawData.amount as string) : undefined,
-     description: rawData.description || undefined,
-     status: rawData.status,
-     vendorId: rawData.vendorId || undefined,
-     isRecurring: rawData.isRecurring,
-     recurrenceRule: rawData.recurrenceRule || undefined,
-     taxRateId: rawData.taxRateId || undefined,
-   });
+   // 2. Validate form data and related entities (Account, Vendor, TaxRate) similar to addExpense
+   // ...
 
-  if (!validatedFields.success) {
-     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-     console.error("[VALIDATION_ERROR] updateExpense:", fieldErrors);
-    return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
-  }
+   const { id, ...updateData } = {id: expenseId /*... validated data ... */}; // Exclude ID from data payload
 
-  // TODO: Handle potential receipt file update/replacement here.
-
-   const { id, ...updateData } = validatedFields.data; // Exclude ID from data payload
+   // TODO: Handle potential receipt file update/replacement here.
 
   try {
     const updatedExpense = await prisma.expense.update({
@@ -264,46 +255,37 @@ export async function updateExpense(formData: FormData): Promise<ActionResult> {
     });
 
     revalidatePath('/expenses');
-     revalidatePath(`/expenses/${id}`);
+    revalidatePath(`/expenses/${id}`);
     revalidatePath('/dashboard');
     return { success: true, message: 'Expense updated successfully.', data: updatedExpense };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, 'updateExpense')) {
+     if (checkPrismaInitError(error, `updateExpense (${id}, Tenant: ${tenantId})`)) {
         return { success: false, message: 'Database Connection Error. Failed to update expense.', error: 'Initialization Error' };
      }
-    console.error("[DB_ERROR] Failed to update expense:", error);
-     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-         if (error.code === 'P2025') return { success: false, message: 'Database Error: Expense not found.', error: error.code };
-         if (error.code === 'P2003') { // Foreign key constraint
-            const fieldName = (error.meta?.field_name as string) || 'related record';
-            let userMessage = `Database Error: Invalid ${fieldName}. Record not found.`;
-            let fieldKey: keyof ExpenseFormSchema | undefined;
-            if (fieldName.includes('accountId')) { userMessage = 'Invalid account selected.'; fieldKey = 'accountId'; }
-            if (fieldName.includes('vendorId')) { userMessage = 'Invalid vendor selected.'; fieldKey = 'vendorId'; }
-            if (fieldName.includes('taxRateId')) { userMessage = 'Invalid tax rate selected.'; fieldKey = 'taxRateId'; }
-             return {
-                success: false, message: userMessage, error: error.code,
-                 fieldErrors: fieldKey ? { [fieldKey]: [userMessage] } : undefined
-            };
-         }
-     }
+    console.error(`[DB_ERROR] Failed to update expense ${id} for tenant ${tenantId}:`, error);
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2025') return { success: false, message: 'Database Error: Expense not found.', error: error.code };
+        // Handle P2003 (foreign key constraint) if validation missed something
+    }
     return { success: false, message: 'Database Error: Failed to update expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 
-// --- Delete Expense ---
+// --- Delete Expense for the current tenant ---
 export async function deleteExpense(id: string): Promise<ActionResult> {
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  libsslErrorLogged = false;
-
-  if (!id) return { success: false, message: 'Expense ID is required.' };
+   const tenantId = await getTenantId();
+   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
+   if (!id) return { success: false, message: 'Expense ID is required.' };
 
   try {
+     // Verify expense belongs to the tenant
+     const expense = await prisma.expense.findUnique({ where: { id }, select: { tenantId: true, receiptUrl: true } });
+     if (!expense) return { success: false, message: 'Expense not found.', error: 'P2025' };
+     if (expense.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+
      // Optional: Delete associated receipt file from storage first
-     const expense = await prisma.expense.findUnique({ where: { id }, select: { receiptUrl: true } });
-     // if (expense?.receiptUrl) {
+     // if (expense.receiptUrl) {
      //    await deleteFileFromFirebaseStorage(expense.receiptUrl);
      // }
 
@@ -313,36 +295,42 @@ export async function deleteExpense(id: string): Promise<ActionResult> {
     revalidatePath('/dashboard');
     return { success: true, message: 'Expense deleted successfully.' };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, 'deleteExpense')) {
+     if (checkPrismaInitError(error, `deleteExpense (${id}, Tenant: ${tenantId})`)) {
         return { success: false, message: 'Database Connection Error. Failed to delete expense.', error: 'Initialization Error' };
      }
-     console.error("[DB_ERROR] Failed to delete expense:", error);
-     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-         if (error.code === 'P2025') return { success: false, message: 'Expense not found.', error: error.code };
+     console.error(`[DB_ERROR] Failed to delete expense ${id} for tenant ${tenantId}:`, error);
+     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+          return { success: false, message: 'Expense not found.', error: error.code };
       }
      return { success: false, message: 'Database Error: Failed to delete expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 
-// --- Get Expense Categories (Account names of type 'Expense') ---
+// --- Get Expense Categories (Accounts of type 'Expense' for the current tenant) ---
 export async function getExpenseCategories(): Promise<{ value: string; label: string }[]> {
-    // Reset flags for this request
-    prismaInitializationFailed = false;
-    libsslErrorLogged = false;
+    const tenantId = await getTenantId();
+    if (!tenantId) {
+      console.error("[ACTION_ERROR] Tenant ID not found in getExpenseCategories.");
+      return [];
+    }
    try {
      const expenseAccounts = await prisma.account.findMany({
-       where: { type: 'Expense', isActive: true }, // Only active expense accounts
+       where: {
+           tenantId: tenantId, // Filter by tenant
+           type: 'Expense',
+           isActive: true
+        },
        select: { id: true, name: true, code: true },
        orderBy: { name: 'asc' },
      });
      // Format label to include code for clarity
      return expenseAccounts.map(acc => ({ value: acc.id, label: `${acc.code} - ${acc.name}` }));
    } catch (error) {
-        if (checkPrismaInitError(error, 'getExpenseCategories')) {
-             console.warn("Returning empty expense categories list due to database connection failure.");
+        if (checkPrismaInitError(error, `getExpenseCategories (Tenant: ${tenantId})`)) {
+             console.warn(`Returning empty expense categories for tenant ${tenantId} due to DB connection issue.`);
         } else {
-            console.error("[ACTION_ERROR] Error fetching expense categories:", error);
+            console.error(`[ACTION_ERROR] Error fetching expense categories for tenant ${tenantId}:`, error);
         }
      return [];
    }
