@@ -1,7 +1,7 @@
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { PlusCircle } from 'lucide-react';
+import { PlusCircle, FileText, Eye } from 'lucide-react'; // Added Eye icon
 import {
   Table,
   TableHeader,
@@ -20,6 +20,13 @@ const invoices = [
   { invoiceId: 'INV-002', client: 'Globex Inc.', issueDate: '2024-05-15', dueDate: '2024-06-14', amount: 850.50, status: 'Pending' },
   { invoiceId: 'INV-003', client: 'Stark Industries', issueDate: '2024-04-20', dueDate: '2024-05-20', amount: 2500.00, status: 'Overdue' },
 ];
+
+// Placeholder function for viewing/generating PDF - replace with actual implementation
+const handleViewPdf = (invoiceId: string) => {
+  alert(`Generating PDF for invoice ${invoiceId}... (Implementation needed)`);
+  // In a real app, you would likely navigate to a PDF view route or trigger a download.
+  // Example: window.open(`/invoices/${invoiceId}/pdf`, '_blank');
+};
 
 export default function InvoicesPage() {
   return (
@@ -61,8 +68,22 @@ export default function InvoicesPage() {
                   <TableCell>{invoice.dueDate}</TableCell>
                    <TableCell>{invoice.status}</TableCell>
                   <TableCell className="text-right">${invoice.amount.toFixed(2)}</TableCell>
-                   <TableCell className="text-right">
-                     <Button variant="ghost" size="sm">View</Button> {/* Add edit/delete later */}
+                   <TableCell className="text-right space-x-1">
+                     <Button variant="ghost" size="icon" className="h-8 w-8">
+                        <Eye className="h-4 w-4" />
+                        <span className="sr-only">View Invoice</span>
+                      </Button>
+                     <Button
+                       variant="ghost"
+                       size="icon"
+                       className="h-8 w-8"
+                       onClick={() => handleViewPdf(invoice.invoiceId)}
+                       title="View PDF"
+                      >
+                       <FileText className="h-4 w-4" />
+                       <span className="sr-only">View PDF</span>
+                      </Button>
+                      {/* Add edit/delete later if needed */}
                   </TableCell>
                 </TableRow>
               ))}

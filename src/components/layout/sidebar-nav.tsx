@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Receipt, FileText, BookOpen, DollarSign } from 'lucide-react';
+import { Home, Receipt, FileText, BookOpen, DollarSign, BarChart3 } from 'lucide-react'; // Added BarChart3
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import type { FC } from 'react';
@@ -17,6 +17,7 @@ const navItems = [
   { href: '/expenses', label: 'Expenses', icon: DollarSign },
   { href: '/invoices', label: 'Invoices', icon: Receipt },
   { href: '/chart-of-accounts', label: 'Chart of Accounts', icon: BookOpen },
+  { href: '/reports', label: 'Reports', icon: BarChart3 }, // Added Reports link
 ];
 
 export const SidebarNav: FC<SidebarNavProps> = ({ isMobile = false, className }) => {
