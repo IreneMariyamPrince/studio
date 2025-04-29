@@ -1,12 +1,11 @@
 
 'use client';
 
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
+import type { UseFormReturn } from 'react-hook-form'; // Import UseFormReturn type
 import { accountSchema, AccountSchema, accountTypes } from '@/lib/schemas/account';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label'; // Keep Label for structure if needed
+// import { Label } from '@/components/ui/label'; // Can be removed if using FormLabel
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
@@ -19,50 +18,30 @@ import {
 } from '@/components/ui/form';
 import { DialogFooter } from '@/components/ui/dialog';
 import { Loader2 } from 'lucide-react';
-import type { FC } from 'react'; // Import FC type
+import type { FC } from 'react';
 
 interface AccountFormProps {
-  action: (formData: FormData) => void; // Expects a server action
+  // action: (formData: FormData) => void; // Removed: Now handled by onSubmit
+  form: UseFormReturn<AccountSchema>; // Accept react-hook-form instance
+  onSubmit: (data: AccountSchema) => void; // Callback for form submission
   isPending: boolean; // To show loading state
   onCancel: () => void;
-  defaultValues?: Partial<AccountSchema>; // For editing
+  // defaultValues prop is handled by the form instance passed in
   submitButtonText?: string; // Custom text for submit button
 }
 
 export const AccountForm: FC<AccountFormProps> = ({
-  action,
+  form, // Use the passed form instance
+  onSubmit,
   isPending,
   onCancel,
-  defaultValues,
-  submitButtonText = "Save Account"
+  submitButtonText = "Save Account",
 }) => {
-  const form = useForm<AccountSchema>({
-    resolver: zodResolver(accountSchema),
-    defaultValues: defaultValues || {
-      code: '',
-      name: '',
-      type: undefined,
-      description: '',
-    },
-  });
-
-  // Handle form submission using the provided server action
-  const onSubmit = (data: AccountSchema) => {
-    const formData = new FormData();
-    Object.entries(data).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        formData.append(key, String(value));
-      }
-    });
-     if (defaultValues?.id) { // Include ID if editing
-      formData.append('id', defaultValues.id);
-     }
-    action(formData);
-  };
+  // The form instance (including resolver and defaultValues) is now managed by the parent component (e.g., AddAccountDialog, EditAccountDialog)
 
   return (
     <Form {...form}>
-      {/* Use form.handleSubmit which integrates with react-hook-form validation */}
+      {/* Use form.handleSubmit provided by react-hook-form */}
       <form onSubmit={form.handleSubmit(onSubmit)} className="grid gap-4 py-4">
         <FormField
           control={form.control}
@@ -73,7 +52,7 @@ export const AccountForm: FC<AccountFormProps> = ({
               <FormControl>
                 <Input placeholder="e.g., 1010" {...field} disabled={isPending} />
               </FormControl>
-              <FormMessage />
+              <FormMessage /> {/* Displays validation errors */}
             </FormItem>
           )}
         />
@@ -98,7 +77,8 @@ export const AccountForm: FC<AccountFormProps> = ({
               <FormLabel>Account Type</FormLabel>
               <Select
                 onValueChange={field.onChange}
-                defaultValue={field.value}
+                defaultValue={field.value} // Use value from form state
+                value={field.value} // Controlled component
                 disabled={isPending}
               >
                 <FormControl>
@@ -140,7 +120,7 @@ export const AccountForm: FC<AccountFormProps> = ({
           <Button type="button" variant="outline" onClick={onCancel} disabled={isPending}>
             Cancel
           </Button>
-          <Button type="submit" disabled={isPending}>
+          <Button type="submit" disabled={isPending || !form.formState.isDirty}> {/* Optionally disable if form not dirty */}
             {isPending ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Saving...

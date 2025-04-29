@@ -5,15 +5,26 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
 import { expenseSchema, ExpenseSchema } from '@/lib/schemas/expense'; // Assuming schema exists
+import type { Prisma } from '@prisma/client'; // Import Prisma types
 
 // Type definition for action results
-type ActionResult = { success: boolean; message: string; data?: any; error?: unknown };
+type ActionResult = {
+    success: boolean;
+    message: string;
+    data?: any;
+    error?: unknown;
+    fieldErrors?: Record<string, string[]>
+};
 
 // --- Get Expenses ---
 export async function getExpenses(): Promise<ExpenseSchema[]> {
   try {
     const expenses = await prisma.expense.findMany({
-      include: { account: true }, // Include the related account name
+      include: {
+        account: { // Include only necessary fields from account
+            select: { id: true, name: true, code: true, type: true }
+        }
+       },
       orderBy: { date: 'desc' },
     });
 
@@ -21,45 +32,41 @@ export async function getExpenses(): Promise<ExpenseSchema[]> {
      return expenses.map(exp => expenseSchema.parse({
          ...exp,
          date: new Date(exp.date), // Ensure date is a Date object
-         account: { // Only include needed fields if Account schema is complex
-             id: exp.account.id,
-             name: exp.account.name,
-             code: exp.account.code,
-             type: exp.account.type,
-         },
-         // Handle potential null description
+         // Account should match the select structure if using strict parsing
+         account: exp.account,
+         // Handle potential null fields from DB -> undefined for zod optional
          description: exp.description ?? undefined,
          receiptUrl: exp.receiptUrl ?? undefined,
      }));
   } catch (error) {
-    console.error("Error fetching expenses:", error);
-    return [];
+    console.error("[ACTION_ERROR] Error fetching expenses:", error);
+    return []; // Return empty array on error
   }
 }
 
 // --- Get Expense by ID ---
 export async function getExpenseById(id: string): Promise<ExpenseSchema | null> {
+  if (!id) return null;
   try {
     const expense = await prisma.expense.findUnique({
       where: { id },
-      include: { account: true },
+      include: {
+        account: {
+            select: { id: true, name: true, code: true, type: true }
+        }
+       },
     });
     if (!expense) return null;
 
      return expenseSchema.parse({
          ...expense,
          date: new Date(expense.date),
-         account: {
-             id: expense.account.id,
-             name: expense.account.name,
-             code: expense.account.code,
-             type: expense.account.type,
-         },
+         account: expense.account,
          description: expense.description ?? undefined,
          receiptUrl: expense.receiptUrl ?? undefined,
      });
   } catch (error) {
-     console.error(`Error fetching expense ${id}:`, error);
+     console.error(`[ACTION_ERROR] Error fetching expense ${id}:`, error);
     return null;
   }
 }
@@ -76,15 +83,23 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
     // receiptUrl: formData.get('receiptUrl'), // Handle file upload separately
   };
 
-  const validatedFields = expenseSchema.omit({ id: true, createdAt: true, updatedAt: true, receiptUrl: true, account: true }).safeParse({
+  // Schema for creation (omitting server-generated fields and relations)
+  const createExpenseSchema = expenseSchema.omit({
+      id: true, createdAt: true, updatedAt: true, receiptUrl: true, account: true
+    });
+
+  const validatedFields = createExpenseSchema.safeParse({
      ...rawData,
      date: rawData.date ? new Date(rawData.date as string) : undefined,
      amount: rawData.amount ? parseFloat(rawData.amount as string) : undefined,
+     description: rawData.description || undefined, // Map empty string to undefined
+     status: rawData.status // Already defaulted if null
   });
 
   if (!validatedFields.success) {
-     console.error("Expense Validation Failed:", validatedFields.error.flatten().fieldErrors);
-    return { success: false, message: 'Validation failed.', error: validatedFields.error.flatten().fieldErrors };
+     const fieldErrors = validatedFields.error.flatten().fieldErrors;
+     console.error("[VALIDATION_ERROR] addExpense:", fieldErrors);
+    return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
   // TODO: Handle receipt file upload here.
@@ -104,20 +119,31 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
     revalidatePath('/expenses');
     revalidatePath('/dashboard'); // Update dashboard stats
     return { success: true, message: 'Expense added successfully.', data: expense };
-  } catch (error) {
-    console.error("Error adding expense:", error);
-     // Check if account exists
-     if ((error as any).code === 'P2003' && (error as any).meta?.field_name?.includes('accountId')) {
-         return { success: false, message: 'Invalid account selected.' };
-     }
-    return { success: false, message: 'Database Error: Failed to add expense.', error };
+  } catch (error: unknown) {
+    console.error("[DB_ERROR] Failed to add expense:", error);
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        // Foreign key constraint failed (e.g., invalid accountId)
+        if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('accountId')) {
+           return {
+               success: false,
+               message: 'Database Error: The selected account does not exist.',
+               error: error.code,
+               fieldErrors: { accountId: ['Invalid account selected.'] }
+            };
+        }
+    }
+    return {
+        success: false,
+        message: 'Database Error: Failed to add expense.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
 // --- Update Expense ---
-const updateExpenseSchema = expenseSchema.extend({
+const updateExpenseFormSchema = expenseSchema.extend({
   id: z.string().cuid(), // ID is required for update
-}).omit({ createdAt: true, updatedAt: true, receiptUrl: true, account: true }); // Omit fields not updated here
+}).omit({ createdAt: true, updatedAt: true, receiptUrl: true, account: true }); // Omit fields not updated directly or via relations
 
 export async function updateExpense(formData: FormData): Promise<ActionResult> {
    const expenseId = formData.get('id') as string;
@@ -134,41 +160,55 @@ export async function updateExpense(formData: FormData): Promise<ActionResult> {
      // receiptUrl: logic to handle potential new receipt upload
    };
 
-   const validatedFields = updateExpenseSchema.safeParse({
-     id: expenseId, // Include ID for parsing
+   const validatedFields = updateExpenseFormSchema.safeParse({
+     id: expenseId, // Include ID for parsing context, but it's not part of updateData
      ...rawData,
      date: rawData.date ? new Date(rawData.date as string) : undefined,
      amount: rawData.amount ? parseFloat(rawData.amount as string) : undefined,
+     description: rawData.description || undefined, // Map empty string to undefined
+     status: rawData.status // Status should be present
    });
 
   if (!validatedFields.success) {
-     console.error("Expense Update Validation Failed:", validatedFields.error.flatten().fieldErrors);
-    return { success: false, message: 'Validation failed.', error: validatedFields.error.flatten().fieldErrors };
+     const fieldErrors = validatedFields.error.flatten().fieldErrors;
+     console.error("[VALIDATION_ERROR] updateExpense:", fieldErrors);
+    return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
   // TODO: Handle potential receipt file update/replacement here.
 
-   const { id, ...updateData } = validatedFields.data;
+   const { id, ...updateData } = validatedFields.data; // Exclude ID from data payload
 
   try {
     const updatedExpense = await prisma.expense.update({
-      where: { id: id },
-      data: updateData,
+      where: { id: id }, // Use the validated ID here
+      data: updateData, // Use the rest of the validated data
     });
 
     revalidatePath('/expenses');
      revalidatePath(`/expenses/${id}`); // Revalidate specific expense page if exists
     revalidatePath('/dashboard');
     return { success: true, message: 'Expense updated successfully.', data: updatedExpense };
-  } catch (error) {
-    console.error("Error updating expense:", error);
-     if ((error as any).code === 'P2025') {
-       return { success: false, message: 'Expense not found.' };
+  } catch (error: unknown) {
+    console.error("[DB_ERROR] Failed to update expense:", error);
+     if (error instanceof Prisma.PrismaClientKnownRequestError) {
+         if (error.code === 'P2025') {
+           return { success: false, message: 'Database Error: Expense not found.', error: error.code };
+         }
+         if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('accountId')) {
+             return {
+                success: false,
+                message: 'Database Error: The selected account does not exist.',
+                error: error.code,
+                fieldErrors: { accountId: ['Invalid account selected.'] }
+            };
+         }
      }
-     if ((error as any).code === 'P2003' && (error as any).meta?.field_name?.includes('accountId')) {
-         return { success: false, message: 'Invalid account selected.' };
-     }
-    return { success: false, message: 'Database Error: Failed to update expense.', error };
+    return {
+        success: false,
+        message: 'Database Error: Failed to update expense.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
@@ -181,6 +221,8 @@ export async function deleteExpense(id: string): Promise<ActionResult> {
 
   try {
      // Optional: Delete associated receipt file from storage first
+     // await deleteReceiptFromStorage(expense.receiptUrl); // Implement this if needed
+
     await prisma.expense.delete({
       where: { id },
     });
@@ -188,12 +230,19 @@ export async function deleteExpense(id: string): Promise<ActionResult> {
     revalidatePath('/expenses');
     revalidatePath('/dashboard');
     return { success: true, message: 'Expense deleted successfully.' };
-  } catch (error) {
-     console.error("Error deleting expense:", error);
-     if ((error as any).code === 'P2025') {
-         return { success: false, message: 'Expense not found.' };
-     }
-    return { success: false, message: 'Database Error: Failed to delete expense.', error };
+  } catch (error: unknown) {
+     console.error("[DB_ERROR] Failed to delete expense:", error);
+     if (error instanceof Prisma.PrismaClientKnownRequestError) {
+         // Record to delete not found
+         if (error.code === 'P2025') {
+             return { success: false, message: 'Expense not found. It may have already been deleted.', error: error.code };
+         }
+      }
+     return {
+        success: false,
+        message: 'Database Error: Failed to delete expense.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
@@ -208,7 +257,7 @@ export async function getExpenseCategories(): Promise<{ value: string; label: st
      });
      return expenseAccounts.map(acc => ({ value: acc.id, label: acc.name }));
    } catch (error) {
-     console.error("Error fetching expense categories:", error);
+     console.error("[ACTION_ERROR] Error fetching expense categories:", error);
      return [];
    }
  }

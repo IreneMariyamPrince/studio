@@ -4,42 +4,74 @@
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
-import { invoiceSchema, invoiceItemSchema, clientSchema, InvoiceSchema } from '@/lib/schemas/invoice';
+import { invoiceSchema, invoiceItemSchema, clientSchema, InvoiceSchema, invoiceFormSchema } from '@/lib/schemas/invoice';
+import type { Prisma } from '@prisma/client'; // Import Prisma types
 
 // Type definition for action results
-type ActionResult = { success: boolean; message: string; data?: any; error?: unknown };
+type ActionResult = {
+    success: boolean;
+    message: string;
+    data?: any;
+    error?: unknown;
+    fieldErrors?: Record<string, string[]>
+};
 
 // --- Client Actions ---
+
+// Schema for client creation (omit server-generated fields)
+const createClientSchema = clientSchema.omit({ id: true, createdAt: true, updatedAt: true });
 
 export async function getClients(): Promise<ClientSchema[]> {
   try {
     const clients = await prisma.client.findMany({ orderBy: { name: 'asc' } });
-    return clients.map(client => clientSchema.parse(client));
+    // Validate on fetch (optional but good practice)
+    return clients.map(client => clientSchema.parse({
+        ...client,
+        email: client.email ?? undefined,
+        address: client.address ?? undefined,
+    }));
   } catch (error) {
-    console.error("Error fetching clients:", error);
+    console.error("[ACTION_ERROR] Error fetching clients:", error);
     return [];
   }
 }
 
 export async function addClient(formData: FormData): Promise<ActionResult> {
   const rawData = Object.fromEntries(formData.entries());
-  const validatedFields = clientSchema.omit({ id: true }).safeParse(rawData); // Omit ID for creation
+  const validatedFields = createClientSchema.safeParse({
+      ...rawData,
+      email: rawData.email || undefined, // Treat empty string as undefined for optional email
+      address: rawData.address || undefined,
+  });
 
   if (!validatedFields.success) {
-     console.error("Client Validation Failed:", validatedFields.error.flatten().fieldErrors);
-    return { success: false, message: 'Validation failed.', error: validatedFields.error.flatten().fieldErrors };
+     const fieldErrors = validatedFields.error.flatten().fieldErrors;
+     console.error("[VALIDATION_ERROR] addClient:", fieldErrors);
+    return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
   try {
     const client = await prisma.client.create({ data: validatedFields.data });
-    revalidatePath('/invoices'); // Or relevant client page
+    revalidatePath('/invoices/new'); // Revalidate invoice form to show new client
+    revalidatePath('/clients'); // Or relevant client page if exists
     return { success: true, message: `Client "${client.name}" created.`, data: client };
-  } catch (error: any) {
-    console.error("Error creating client:", error);
-     if (error.code === 'P2002' && error.meta?.target?.includes('email')) {
-        return { success: false, message: 'Client email already exists.' };
+  } catch (error: unknown) {
+    console.error("[DB_ERROR] Failed to create client:", error);
+     if (error instanceof Prisma.PrismaClientKnownRequestError) {
+        if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email')) {
+            return {
+                success: false,
+                message: 'Database Error: Client email already exists.',
+                error: error.code,
+                fieldErrors: { email: ['Email already exists.'] }
+             };
+        }
      }
-    return { success: false, message: 'Database Error: Failed to create client.', error };
+    return {
+        success: false,
+        message: 'Database Error: Failed to create client.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
@@ -47,54 +79,77 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
 
 // Helper to generate the next invoice number
 async function getNextInvoiceNumber(): Promise<string> {
-  const lastInvoice = await prisma.invoice.findFirst({
-    orderBy: { createdAt: 'desc' },
-    select: { invoiceNumber: true },
-  });
+  try {
+      const lastInvoice = await prisma.invoice.findFirst({
+        orderBy: { createdAt: 'desc' },
+        select: { invoiceNumber: true },
+      });
 
-  if (!lastInvoice || !lastInvoice.invoiceNumber) {
-    return 'INV-001';
+      if (!lastInvoice || !lastInvoice.invoiceNumber) {
+        return 'INV-0001'; // Start with 4 digits
+      }
+
+      const match = lastInvoice.invoiceNumber.match(/INV-(\d+)/);
+      if (match && match[1]) {
+        const nextNum = parseInt(match[1], 10) + 1;
+        return `INV-${String(nextNum).padStart(4, '0')}`; // Pad to 4 digits
+      }
+
+      // Fallback if format is unexpected (less likely now)
+      console.warn("Unexpected invoice number format found. Generating fallback.");
+      const count = await prisma.invoice.count();
+      return `INV-${String(count + 1).padStart(4, '0')}`;
+  } catch (error) {
+      console.error("[HELPER_ERROR] Failed to get next invoice number:", error);
+      // Provide a safe fallback in case of DB error during lookup
+      return `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
   }
-
-  const match = lastInvoice.invoiceNumber.match(/INV-(\d+)/);
-  if (match && match[1]) {
-    const nextNum = parseInt(match[1], 10) + 1;
-    return `INV-${String(nextNum).padStart(3, '0')}`;
-  }
-
-  // Fallback if format is unexpected
-  return `INV-${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}`;
 }
 
 export async function getInvoices(): Promise<InvoiceSchema[]> {
   try {
     const invoices = await prisma.invoice.findMany({
-      include: { client: true, items: true }, // Include related data
+      include: {
+          client: { select: { id: true, name: true, email: true, address: true } }, // Select needed client fields
+          items: true // Include all item fields for now
+        },
       orderBy: { issueDate: 'desc' },
     });
 
      // Parse and potentially transform data before returning
      return invoices.map(inv => invoiceSchema.parse({
          ...inv,
-         // Ensure dates are Dates if needed, Prisma returns DateTime objects
-         issueDate: new Date(inv.issueDate),
+         issueDate: new Date(inv.issueDate), // Ensure Date objects
          dueDate: new Date(inv.dueDate),
-         // Optionally parse client and items if schema requires full objects
-         client: clientSchema.parse(inv.client),
-         items: inv.items.map(item => invoiceItemSchema.parse(item)),
+         // Ensure optional fields are handled
+         notes: inv.notes ?? undefined,
+         // Parse client and items strictly according to schema
+         client: clientSchema.parse({
+             ...inv.client,
+             email: inv.client.email ?? undefined,
+             address: inv.client.address ?? undefined,
+         }),
+         items: inv.items.map(item => invoiceItemSchema.parse({
+             ...item,
+             // No optional fields in item schema currently
+         })),
      }));
 
   } catch (error) {
-    console.error("Error fetching invoices:", error);
+    console.error("[ACTION_ERROR] Error fetching invoices:", error);
     return [];
   }
 }
 
 export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> {
+  if (!id) return null;
   try {
     const invoice = await prisma.invoice.findUnique({
       where: { id },
-      include: { client: true, items: true },
+       include: {
+          client: { select: { id: true, name: true, email: true, address: true } },
+          items: true
+        },
     });
      if (!invoice) return null;
 
@@ -103,46 +158,90 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
         ...invoice,
         issueDate: new Date(invoice.issueDate),
         dueDate: new Date(invoice.dueDate),
-        client: clientSchema.parse(invoice.client),
+        notes: invoice.notes ?? undefined,
+        client: clientSchema.parse({
+             ...invoice.client,
+             email: invoice.client.email ?? undefined,
+             address: invoice.client.address ?? undefined,
+        }),
         items: invoice.items.map(item => invoiceItemSchema.parse(item)),
      });
   } catch (error) {
-     console.error(`Error fetching invoice ${id}:`, error);
+     console.error(`[ACTION_ERROR] Error fetching invoice ${id}:`, error);
     return null;
   }
 }
 
 
 export async function createInvoice(formData: FormData): Promise<ActionResult> {
-   // Extract and parse items from formData (assuming they are sent as JSON string)
+   // 1. Validate basic invoice fields first
+   const basicInvoiceData = {
+        clientId: formData.get('clientId'),
+        issueDate: formData.get('issueDate'),
+        dueDate: formData.get('dueDate'),
+        status: formData.get('status') || 'Draft',
+        notes: formData.get('notes'),
+    };
+
+   const basicValidation = invoiceFormSchema.omit({ items: true }).safeParse({
+        ...basicInvoiceData,
+        issueDate: basicInvoiceData.issueDate ? new Date(basicInvoiceData.issueDate as string) : undefined,
+        dueDate: basicInvoiceData.dueDate ? new Date(basicInvoiceData.dueDate as string) : undefined,
+        notes: basicInvoiceData.notes || undefined, // map empty to undefined
+   });
+
+    if (!basicValidation.success) {
+        const fieldErrors = basicValidation.error.flatten().fieldErrors;
+        console.error("[VALIDATION_ERROR] createInvoice (basic):", fieldErrors);
+        return { success: false, message: 'Basic invoice validation failed.', error: "Validation Error", fieldErrors };
+    }
+
+    // 2. Parse and validate items
    const itemsJson = formData.get('items') as string;
-   let itemsData: any[];
+   let parsedItems: any[];
    try {
-     itemsData = JSON.parse(itemsJson);
-     // Validate each item
-     itemsData.forEach(item => invoiceItemSchema.omit({ id: true, invoiceId: true }).parse(item));
+     if (!itemsJson) throw new Error("Invoice items are missing.");
+     parsedItems = JSON.parse(itemsJson);
+     if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
+         throw new Error("Invoice must have at least one item.");
+     }
    } catch (error) {
-     console.error("Error parsing or validating invoice items:", error);
-     return { success: false, message: 'Invalid invoice items data.', error };
+     console.error("[VALIDATION_ERROR] createInvoice (items JSON parsing):", error);
+     return { success: false, message: 'Invalid invoice items data format.', error: "Validation Error", fieldErrors: { items: ['Invalid items format or missing items.'] } };
    }
 
-  // Calculate total from validated items
-   const total = itemsData.reduce((sum, item) => sum + (Number(item.quantity) * Number(item.unitPrice)), 0);
+   // Validate each item using the schema and calculate totals
+   const validatedItemsData: { description: string; quantity: number; unitPrice: number; total: number }[] = [];
+   let calculatedTotal = 0;
+   const itemErrors: string[] = [];
 
-  const validatedFields = invoiceSchema.omit({ id: true, invoiceNumber: true, createdAt: true, updatedAt: true, items: true, client: true, total: true }).safeParse({
-    clientId: formData.get('clientId'),
-    issueDate: new Date(formData.get('issueDate') as string),
-    dueDate: new Date(formData.get('dueDate') as string),
-    status: formData.get('status') || 'Draft', // Default to Draft if not provided
-    notes: formData.get('notes') || null,
-  });
+   for (let i = 0; i < parsedItems.length; i++) {
+       const item = parsedItems[i];
+       const itemValidation = invoiceItemSchema.omit({ id: true, invoiceId: true }).safeParse({
+           description: item.description,
+           quantity: parseInt(item.quantity, 10), // Ensure integer
+           unitPrice: parseFloat(item.unitPrice), // Ensure float
+       });
 
-  if (!validatedFields.success) {
-     console.error("Invoice Validation Failed:", validatedFields.error.flatten().fieldErrors);
-    return { success: false, message: 'Validation failed.', error: validatedFields.error.flatten().fieldErrors };
-  }
+       if (!itemValidation.success) {
+            const errors = itemValidation.error.flatten().fieldErrors;
+            // Aggregate errors for the 'items' field
+            Object.values(errors).flat().forEach(errMsg => itemErrors.push(`Item ${i+1}: ${errMsg}`));
+       } else {
+           const validItem = itemValidation.data;
+           const itemTotal = validItem.quantity * validItem.unitPrice;
+            validatedItemsData.push({ ...validItem, total: itemTotal });
+            calculatedTotal += itemTotal;
+       }
+   }
 
-  const { clientId, issueDate, dueDate, status, notes } = validatedFields.data;
+    if (itemErrors.length > 0) {
+        console.error("[VALIDATION_ERROR] createInvoice (items validation):", itemErrors);
+        return { success: false, message: 'Invoice items validation failed.', error: "Validation Error", fieldErrors: { items: itemErrors } };
+    }
+
+  // Combine validated data
+  const { clientId, issueDate, dueDate, status, notes } = basicValidation.data;
 
   try {
      const invoiceNumber = await getNextInvoiceNumber();
@@ -155,13 +254,13 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
         dueDate,
         status,
         notes,
-        total: total, // Store calculated total
+        total: calculatedTotal, // Use calculated total
         items: {
-          create: itemsData.map(item => ({
+          create: validatedItemsData.map(item => ({ // Use validated item data
             description: item.description,
-            quantity: parseInt(item.quantity, 10),
-            unitPrice: parseFloat(item.unitPrice),
-            total: parseFloat(item.quantity) * parseFloat(item.unitPrice),
+            quantity: item.quantity,
+            unitPrice: item.unitPrice,
+            total: item.total,
           })),
         },
       },
@@ -172,15 +271,32 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
      revalidatePath(`/invoices/${createdInvoice.id}`); // Revalidate specific invoice page if exists
      revalidatePath('/dashboard'); // Revalidate dashboard for stats
     return { success: true, message: `Invoice ${createdInvoice.invoiceNumber} created.`, data: createdInvoice };
-  } catch (error) {
-    console.error("Error creating invoice:", error);
-    return { success: false, message: 'Database Error: Failed to create invoice.', error };
+  } catch (error: unknown) {
+    console.error("[DB_ERROR] Failed to create invoice:", error);
+     if (error instanceof Prisma.PrismaClientKnownRequestError) {
+         // Foreign key constraint (e.g., invalid clientId)
+         if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('clientId')) {
+            return {
+                success: false,
+                message: 'Database Error: The selected client does not exist.',
+                error: error.code,
+                fieldErrors: { clientId: ['Invalid client selected.'] }
+            };
+         }
+         // Unique constraint (e.g., invoiceNumber - less likely with generator but possible)
+          if (error.code === 'P2002') {
+             return { success: false, message: 'Database Error: Failed to generate unique invoice number.', error: error.code };
+          }
+     }
+    return {
+        success: false,
+        message: 'Database Error: Failed to create invoice.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
-// Add updateInvoice and deleteInvoice actions similarly...
-// Remember to handle item updates/deletions within updateInvoice.
-// For deleteInvoice, consider cascading deletes defined in the schema or manual deletion of items first.
+// Add updateInvoice action similarly...
 
 export async function deleteInvoice(id: string): Promise<ActionResult> {
   if (!id) {
@@ -189,6 +305,13 @@ export async function deleteInvoice(id: string): Promise<ActionResult> {
 
   try {
      // Prisma will cascade delete items due to the schema definition `onDelete: Cascade`
+     // First check if invoice exists
+     const invoice = await prisma.invoice.findUnique({ where: { id: id }, select: { id: true } });
+     if (!invoice) {
+          return { success: false, message: 'Invoice not found. It may have already been deleted.', error: 'P2025' };
+     }
+
+     // Then delete
     await prisma.invoice.delete({
       where: { id },
     });
@@ -196,16 +319,19 @@ export async function deleteInvoice(id: string): Promise<ActionResult> {
     revalidatePath('/invoices');
     revalidatePath('/dashboard');
     return { success: true, message: 'Invoice deleted successfully.' };
-  } catch (error) {
-     console.error("Error deleting invoice:", error);
-     if ((error as any).code === 'P2025') {
-         return { success: false, message: 'Invoice not found.' };
+  } catch (error: unknown) {
+     console.error("[DB_ERROR] Failed to delete invoice:", error);
+     // Catching P2025 might be redundant due to the check above, but kept for safety
+     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
+         return { success: false, message: 'Invoice not found.', error: error.code };
      }
-    return { success: false, message: 'Database Error: Failed to delete invoice.', error };
+    return {
+        success: false,
+        message: 'Database Error: Failed to delete invoice.',
+        error: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
 // --- Schema Definitions (Imported from lib/schemas/invoice) ---
-import type { ClientSchema, InvoiceItemSchema } from '@/lib/schemas/invoice';
-
-
+// Already imported at the top
