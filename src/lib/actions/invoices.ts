@@ -5,9 +5,9 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
 import { invoiceSchema, invoiceItemSchema, InvoiceSchema, invoiceFormSchema } from '@/lib/schemas/invoice';
-import { clientSchema } from '@/lib/schemas/client'; // Ensure client schema is correctly imported
-import type { Prisma } from '@prisma/client'; // Import Prisma types
-import { accountSchema } from '@/lib/schemas/account'; // Import for parsing relations
+import { clientSchema } from '@/lib/schemas/client';
+import { Prisma } from '@prisma/client'; // Import Prisma as a value
+import { accountSchema } from '@/lib/schemas/account';
 
 // Type definition for action results
 type ActionResult = {
