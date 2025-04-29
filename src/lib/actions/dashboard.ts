@@ -152,7 +152,7 @@ export async function getRecentExpenses(limit = 5) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent expenses:", error.message);
              if (error.message.includes('libssl')) {
-                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
+                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Ensure OpenSSL is installed and accessible in your deployment environment. Returning empty list.");
              } else {
                   console.error("DATABASE CONNECTION FAILED (Recent Expenses): Prisma failed to initialize. Returning empty list.");
              }
@@ -180,7 +180,7 @@ export async function getRecentInvoices(limit = 5) {
        if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent invoices:", error.message); // Log the actual error message
              if (error.message.includes('libssl')) {
-                  // Only log the specific root cause once.
+                  console.error("DATABASE CONNECTION FAILED (Recent Invoices): Missing `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Ensure OpenSSL is installed and accessible in your deployment environment. Returning empty list.");
              } else {
                   console.error("DATABASE CONNECTION FAILED (Recent Invoices): Prisma failed to initialize. Check connection details/logs. Returning empty list.");
              }
