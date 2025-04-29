@@ -1,0 +1,94 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite" // Change to "mysql" or "postgresql" for production
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id          String  @id @default(cuid())
+  code        String  @unique
+  name        String
+  type        String // Asset, Liability, Equity, Revenue, Expense
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  expenses Expense[]
+
+  @@index([type])
+}
+
+model Client {
+  id        String  @id @default(cuid())
+  name      String
+  email     String? @unique
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices Invoice[]
+}
+
+model Invoice {
+  id          String   @id @default(cuid())
+  invoiceNumber String @unique // e.g., INV-001
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id])
+  issueDate   DateTime
+  dueDate     DateTime
+  status      String // Draft, Pending, Paid, Overdue, Cancelled
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items InvoiceItem[]
+
+  // Calculated fields (consider if needed directly or calculate on fetch)
+  // subtotal    Float
+  // tax         Float
+  total       Float // Store calculated total for easier querying
+
+  @@index([clientId])
+  @@index([status])
+  @@index([issueDate])
+  @@index([dueDate])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Int
+  unitPrice   Float
+  total       Float // quantity * unitPrice
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([invoiceId])
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  date        DateTime
+  accountId   String // Relates to an Expense type Account
+  account     Account  @relation(fields: [accountId], references: [id])
+  amount      Float
+  description String?
+  receiptUrl  String? // Path or URL to the stored receipt
+  status      String // Pending, Approved, Rejected
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([status])
+  @@index([date])
+}
+
+// Consider adding a User model if authentication is needed later

@@ -1,36 +1,42 @@
-'use client'; // Add this directive to make it a Client Component
 
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, FileText, Eye } from 'lucide-react'; // Added Eye icon
+import { PlusCircle, FileText, Eye, Edit, Trash2 } from 'lucide-react'; // Added icons
 import {
   Table,
   TableHeader,
   TableBody,
-  TableFooter,
+  // TableFooter, // Removed for now
   TableHead,
   TableRow,
   TableCell,
   TableCaption,
 } from "@/components/ui/table";
 import Link from 'next/link';
+import { getInvoices } from '@/lib/actions/invoices'; // Import server action
+import { format } from 'date-fns'; // For date formatting
+import { Badge } from '@/components/ui/badge'; // For status display
+import 'server-only'; // Ensure data fetching on server
+import { DeleteInvoiceDialog } from './_components/delete-invoice-dialog'; // Import delete dialog
 
-// Mock data - replace with actual data fetching
-const invoices = [
-  { invoiceId: 'INV-001', client: 'Acme Corp', issueDate: '2024-05-10', dueDate: '2024-06-09', amount: 1200.00, status: 'Paid' },
-  { invoiceId: 'INV-002', client: 'Globex Inc.', issueDate: '2024-05-15', dueDate: '2024-06-14', amount: 850.50, status: 'Pending' },
-  { invoiceId: 'INV-003', client: 'Stark Industries', issueDate: '2024-04-20', dueDate: '2024-05-20', amount: 2500.00, status: 'Overdue' },
-];
+function formatCurrency(amount: number): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+}
 
-// Placeholder function for viewing/generating PDF - replace with actual implementation
-const handleViewPdf = (invoiceId: string) => {
-  alert(`Generating PDF for invoice ${invoiceId}... (Implementation needed)`);
-  // In a real app, you would likely navigate to a PDF view route or trigger a download.
-  // Example: window.open(`/invoices/${invoiceId}/pdf`, '_blank');
+// Map status to badge variants (optional)
+const statusVariantMap: { [key: string]: "default" | "secondary" | "destructive" | "outline" } = {
+  Paid: "default", // Consider a 'success' variant (green)
+  Pending: "secondary",
+  Draft: "outline",
+  Overdue: "destructive",
+  Cancelled: "destructive",
 };
 
-export default function InvoicesPage() {
+export default async function InvoicesPage() {
+  // Fetch invoices on the server
+  const invoices = await getInvoices();
+
   return (
     <DashboardLayout>
       <div className="flex items-center justify-between mb-6">
@@ -52,61 +58,76 @@ export default function InvoicesPage() {
             <TableCaption>A list of your company's recent invoices.</TableCaption>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[100px]">Invoice ID</TableHead>
+                <TableHead className="w-[100px]">Invoice #</TableHead>
                 <TableHead>Client</TableHead>
                 <TableHead>Issue Date</TableHead>
                 <TableHead>Due Date</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right w-[150px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {invoices.map((invoice) => (
-                <TableRow key={invoice.invoiceId}>
-                  <TableCell className="font-medium">{invoice.invoiceId}</TableCell>
-                  <TableCell>{invoice.client}</TableCell>
-                  <TableCell>{invoice.issueDate}</TableCell>
-                  <TableCell>{invoice.dueDate}</TableCell>
-                   <TableCell>{invoice.status}</TableCell>
-                  <TableCell className="text-right">${invoice.amount.toFixed(2)}</TableCell>
-                   <TableCell className="text-right space-x-1">
-                     {/* Placeholder for View Invoice action */}
-                     <Button variant="ghost" size="icon" className="h-8 w-8" title="View Invoice Details">
+                <TableRow key={invoice.id}>
+                  <TableCell className="font-medium">{invoice.invoiceNumber}</TableCell>
+                  <TableCell>{invoice.client.name}</TableCell> {/* Access nested client name */}
+                  <TableCell>{format(new Date(invoice.issueDate), 'PP')}</TableCell>
+                  <TableCell>{format(new Date(invoice.dueDate), 'PP')}</TableCell>
+                  <TableCell>
+                     <Badge variant={statusVariantMap[invoice.status] || 'outline'}>
+                       {invoice.status}
+                     </Badge>
+                  </TableCell>
+                  <TableCell className="text-right">{formatCurrency(invoice.total)}</TableCell>
+                  <TableCell className="text-right space-x-1">
+                    {/* Link to View Invoice Page (create later) */}
+                    <Button asChild variant="ghost" size="icon" className="h-8 w-8">
+                      <Link href={`/invoices/${invoice.id}`} title="View Invoice Details">
                         <Eye className="h-4 w-4" />
                         <span className="sr-only">View Invoice</span>
-                      </Button>
-                     {/* View PDF Button */}
-                     <Button
-                       variant="ghost"
-                       size="icon"
-                       className="h-8 w-8"
-                       onClick={() => handleViewPdf(invoice.invoiceId)} // This onClick requires 'use client'
-                       title="View PDF"
-                      >
+                      </Link>
+                    </Button>
+                     {/* Link to Edit Invoice Page (create later) */}
+                     <Button asChild variant="ghost" size="icon" className="h-8 w-8">
+                        <Link href={`/invoices/${invoice.id}/edit`} title="Edit Invoice">
+                            <Edit className="h-4 w-4" />
+                            <span className="sr-only">Edit Invoice</span>
+                        </Link>
+                     </Button>
+                     {/* Link to Generate/View PDF */}
+                     <Button asChild variant="ghost" size="icon" className="h-8 w-8">
+                      <Link href={`/invoices/${invoice.id}/pdf`} target="_blank" rel="noopener noreferrer" title="View PDF">
                        <FileText className="h-4 w-4" />
                        <span className="sr-only">View PDF</span>
-                      </Button>
-                      {/* Add edit/delete later if needed */}
+                      </Link>
+                     </Button>
+                     {/* Delete Invoice Dialog */}
+                      <DeleteInvoiceDialog invoiceId={invoice.id!} invoiceNumber={invoice.invoiceNumber!}>
+                           <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10" title="Delete Invoice">
+                               <Trash2 className="h-4 w-4" />
+                               <span className="sr-only">Delete Invoice</span>
+                           </Button>
+                      </DeleteInvoiceDialog>
                   </TableCell>
                 </TableRow>
               ))}
-               {invoices.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={7} className="h-24 text-center">
-                      No invoices found.
-                    </TableCell>
-                  </TableRow>
-                )}
+              {invoices.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={7} className="h-24 text-center">
+                    No invoices found. <Link href="/invoices/new" className="text-primary underline">Create one now</Link>.
+                  </TableCell>
+                </TableRow>
+              )}
             </TableBody>
-             {/* Optional Footer */}
-             {/* <TableFooter>
-               <TableRow>
-                 <TableCell colSpan={5}>Total Outstanding</TableCell>
-                 <TableCell className="text-right">$850.50</TableCell>
-                 <TableCell></TableCell>
-               </TableRow>
-             </TableFooter> */}
+            {/* Optional Footer */}
+            {/* <TableFooter>
+              <TableRow>
+                <TableCell colSpan={5}>Total Outstanding</TableCell>
+                <TableCell className="text-right">$850.50</TableCell>
+                <TableCell></TableCell>
+              </TableRow>
+            </TableFooter> */}
           </Table>
         </CardContent>
       </Card>
