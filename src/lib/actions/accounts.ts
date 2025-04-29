@@ -21,8 +21,16 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         ...account,
         description: account.description ?? undefined // Map null to undefined for zod optional
     }));
-  } catch (error) {
-    console.error("[ACTION_ERROR] Error fetching accounts:", error);
+  } catch (error: unknown) {
+    // Log the error appropriately
+    if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error("[ACTION_ERROR] Prisma Initialization Error fetching accounts:", error.message);
+        // Add specific message about the underlying issue if known (like the libssl error)
+        console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+    } else {
+        // Log other types of errors
+        console.error("[ACTION_ERROR] Error fetching accounts:", error);
+    }
     // In a real app, handle this error more gracefully (e.g., return specific error object or throw)
     // Returning empty array for now to avoid breaking the page, but ideally, signal the error upstream.
     return [];
@@ -97,7 +105,14 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
          };
       }
       // Add handling for other relevant Prisma error codes if necessary
-    }
+    } else if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error("[DB_ERROR] Prisma Initialization Error during account creation:", error.message);
+         return {
+            success: false,
+            message: 'Database Initialization Error: Could not connect to the database.',
+            error: 'Initialization Error'
+         };
+     }
 
     // Generic database error
     return {
@@ -175,7 +190,14 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
            return { success: false, message: `Database Error: A unique constraint failed on ${target}.`, error: error.code };
         }
         // Add handling for other relevant Prisma error codes if necessary
-      }
+      } else if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error("[DB_ERROR] Prisma Initialization Error during account update:", error.message);
+         return {
+            success: false,
+            message: 'Database Initialization Error: Could not connect to the database.',
+            error: 'Initialization Error'
+         };
+     }
 
      return {
         success: false,
@@ -221,7 +243,14 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
             };
         }
         // Add handling for other relevant Prisma error codes if necessary
-      }
+      } else if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error("[DB_ERROR] Prisma Initialization Error during account deletion:", error.message);
+         return {
+            success: false,
+            message: 'Database Initialization Error: Could not connect to the database.',
+            error: 'Initialization Error'
+         };
+     }
 
      return {
         success: false,
@@ -236,12 +265,17 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
   if (!id) return null;
   try {
     const account = await prisma.account.findUnique({ where: { id } });
-    return account ? accountSchema.parse({
+    if (!account) return null;
+    return accountSchema.parse({
         ...account,
         description: account.description ?? undefined
-    }) : null;
-  } catch (error) {
-     console.error(`[ACTION_ERROR] Error fetching account with ID ${id}:`, error);
+    });
+  } catch (error: unknown) {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+        console.error(`[ACTION_ERROR] Prisma Initialization Error fetching account with ID ${id}:`, error.message);
+     } else {
+        console.error(`[ACTION_ERROR] Error fetching account with ID ${id}:`, error);
+     }
     return null; // Or throw / return error object
   }
 }
