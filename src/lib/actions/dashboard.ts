@@ -68,12 +68,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     // Handle potential Prisma Initialization errors from any query
     for (const result of results) {
         if (result.status === 'rejected' && result.reason instanceof Prisma.PrismaClientInitializationError) {
-            console.error("[ACTION_ERROR] Prisma Initialization Error fetching dashboard stats:", result.reason.message);
+            console.error("[ACTION_ERROR] Prisma Initialization Error fetching dashboard stats subset:", result.reason.message);
             if (result.reason.message.includes('libssl')) {
                 console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
             }
-            console.error("Database connection failed. Please check server logs.");
-            // Return default stats to prevent breaking UI completely
+            // Return default stats to prevent breaking UI completely if any sub-query fails due to DB connection
             return defaultStats;
         } else if (result.status === 'rejected') {
             // Log other errors but potentially continue if possible
@@ -112,7 +111,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     // Check if error is Prisma Initialization Error (although handled above, good for robustness)
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[ACTION_ERROR] Top-Level Prisma Initialization Error fetching dashboard stats:", error.message);
-         console.error("Database connection failed.");
+         if (error.message.includes('libssl')) {
+           console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+         }
      } else {
          console.error("Unexpected error fetching dashboard stats:", error);
      }
@@ -140,7 +141,6 @@ export async function getRecentExpenses(limit = 5) {
              if (error.message.includes('libssl')) {
                  console.error("Check 'libssl' dependency.");
              }
-             console.error("Database connection failed.");
              // Return empty array to prevent breaking UI completely
              return [];
        }
@@ -167,7 +167,6 @@ export async function getRecentInvoices(limit = 5) {
              if (error.message.includes('libssl')) {
                  console.error("Check 'libssl' dependency.");
              }
-             console.error("Database connection failed.");
              // Return empty array to prevent breaking UI completely
              return [];
        }
