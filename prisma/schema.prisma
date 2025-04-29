@@ -2,120 +2,113 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
-  // Force the use of the OpenSSL 3.0 binary for compatibility with newer systems
-  binaryTargets = ["native", "debian-openssl-3.0.x"]
+  provider        = "prisma-client-js"
+  // Use 'native' first to allow Prisma to attempt auto-detection based on the OS.
+  // Keep the specific debian target as a fallback, although it's the one currently causing issues.
+  // The 'linux-musl-openssl-3.0.x' target is added for environments using musl libc (like Alpine Linux).
+  binaryTargets   = ["native", "debian-openssl-3.0.x", "debian-openssl-1.1.x", "linux-musl-openssl-3.0.x"]
+  previewFeatures = ["driverAdapters"] // Required for neon driver adapter
 }
 
 datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL")
+  provider = "mysql" // Specify MySQL provider
+  url      = env("DATABASE_URL") // Use environment variable for the connection string
 }
 
+// --- Core Models ---
 
-// --- Chart of Accounts ---
 model Account {
   id          String    @id @default(cuid())
-  code        String    @unique @db.VarChar(10) // Ensure unique and set max length
-  name        String    @db.VarChar(100)
-  type        AccountType
-  description String?   @db.Text // Optional longer description
+  code        String    @unique @db.VarChar(10) // Unique code for the account
+  name        String
+  type        String    // e.g., Asset, Liability, Equity, Revenue, Expense
+  description String?
+  isActive    Boolean   @default(true)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  expenses    Expense[] // Relation to Expenses
+  // Relations
+  expenses    Expense[] // An account can have many expenses
+  invoiceItems InvoiceItem[] @relation("AccountInvoiceItems") // Link items directly to accounts if needed for reporting
 
   @@index([type])
+  @@index([name])
 }
 
-enum AccountType {
-  Asset
-  Liability
-  Equity
-  Revenue
-  Expense
-}
-
-
-// --- Expenses ---
 model Expense {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   date        DateTime
-  accountId   String   @map("account_id")
-  amount      Decimal  @db.Decimal(10, 2) // Example: Up to 99,999,999.99
-  description String?  @db.Text
-  receiptUrl  String?  @map("receipt_url") @db.VarChar(2048) // URL for the receipt image/PDF
-  status      ExpenseStatus @default(Pending)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-
-  account     Account  @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
+  accountId   String
+  account     Account   @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
+  amount      Decimal   @db.Decimal(10, 2) // Store amounts precisely
+  description String?
+  receiptUrl  String?   @db.VarChar(2048) // URL to the stored receipt image/PDF
+  status      String    // e.g., Pending, Approved, Rejected
+  userId      String?   // Link to the user who submitted the expense (if needed)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@index([date])
-  @@index([accountId])
   @@index([status])
+  @@index([accountId])
 }
 
-enum ExpenseStatus {
-  Pending
-  Approved
-  Rejected
-}
-
-
-// --- Invoicing ---
 model Client {
   id        String   @id @default(cuid())
-  name      String   @db.VarChar(150)
-  email     String?  @unique @db.VarChar(255)
-  address   String?  @db.Text
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  name      String
+  email     String?  @unique
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  invoices  Invoice[] // Relation to Invoices
-
-  @@index([name])
-  @@index([email])
+  // Relations
+  invoices Invoice[] // A client can have many invoices
 }
 
 model Invoice {
   id            String        @id @default(cuid())
-  invoiceNumber String        @unique @map("invoice_number") @db.VarChar(50) // e.g., INV-001
-  clientId      String        @map("client_id")
-  issueDate     DateTime      @map("issue_date")
-  dueDate       DateTime      @map("due_date")
-  status        InvoiceStatus @default(Draft)
-  notes         String?       @db.Text
-  total         Decimal       @db.Decimal(12, 2) // Example: Up to 9,999,999,999.99
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
-
+  invoiceNumber String        @unique // e.g., INV-001
+  clientId      String
   client        Client        @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client if invoices exist
-  items         InvoiceItem[] // Relation to Invoice Items
+  issueDate     DateTime
+  dueDate       DateTime
+  status        String        // e.g., Draft, Pending, Paid, Overdue, Cancelled
+  total         Decimal       @db.Decimal(12, 2) // Total amount of the invoice
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
 
-  @@index([clientId])
+  // Relations
+  items         InvoiceItem[] // An invoice has many items
+
   @@index([status])
+  @@index([clientId])
   @@index([issueDate])
   @@index([dueDate])
 }
 
 model InvoiceItem {
   id          String   @id @default(cuid())
-  invoiceId   String   @map("invoice_id")
-  description String   @db.Text
-  quantity    Int
-  unitPrice   Decimal  @map("unit_price") @db.Decimal(10, 2)
-  total       Decimal  @db.Decimal(12, 2) // Calculated: quantity * unitPrice
-
+  invoiceId   String
   invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Delete items if invoice is deleted
+  description String
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(12, 2) // quantity * unitPrice
+  accountId   String?  // Optional: Link item to a revenue/service account
+  account     Account? @relation("AccountInvoiceItems", fields: [accountId], references: [id], onDelete: SetNull) // If account deleted, set this to null
 
   @@index([invoiceId])
+  @@index([accountId])
 }
 
-enum InvoiceStatus {
-  Draft
-  Pending
-  Paid
-  Overdue
-  Cancelled
-}
+// --- Optional: User Model (if implementing authentication) ---
+// model User {
+//   id        String   @id @default(cuid())
+//   name      String?
+//   email     String?  @unique
+//   password  String?  // Store hashed password
+//   role      String   @default("user") // e.g., user, admin
+//   createdAt DateTime @default(now())
+//   updatedAt DateTime @updatedAt
+// }
