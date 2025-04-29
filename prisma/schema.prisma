@@ -2,11 +2,9 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
-  // Explicitly define binary targets for compatibility
-  // Include 'native' for the build environment and specific targets for deployment if needed.
-  // 'debian-openssl-1.1.x' is often needed for older Debian/Ubuntu.
-  // 'debian-openssl-3.0.x' is needed for newer Debian/Ubuntu.
+  provider      = "prisma-client-js"
+  // Explicitly specify binary targets. 'native' tries to detect the OS.
+  // Added 'debian-openssl-3.0.x' as OpenSSL 1.1 is often missing on newer systems.
   binaryTargets = ["native", "debian-openssl-1.1.x", "debian-openssl-3.0.x"]
 }
 
@@ -15,18 +13,18 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// === Chart of Accounts ===
+// Chart of Accounts Model
 model Account {
-  id          String    @id @default(cuid())
-  code        String    @unique // e.g., 1010, 6000
-  name        String    // e.g., Cash, Office Supplies Expense
-  type        AccountType // Defined below
+  id          String   @id @default(cuid())
+  code        String   @unique // e.g., 1010
+  name        String   // e.g., Cash, Accounts Receivable
+  type        AccountType // Asset, Liability, Equity, Revenue, Expense
   description String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   // Relations
-  expenses    Expense[] // An account can be linked to many expenses
+  expenses Expense[] // An account can be associated with many expenses
 
   @@index([type])
 }
@@ -39,20 +37,18 @@ enum AccountType {
   Expense
 }
 
-// === Expenses ===
+// Expense Model
 model Expense {
   id          String   @id @default(cuid())
   date        DateTime
   accountId   String   // Foreign key to Account
-  amount      Float    // Using Float for currency, consider Decimal if precision is critical
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Restrict) // Link to Account
+  amount      Float
   description String?
-  receiptUrl  String?  // URL to the uploaded receipt image/PDF
-  status      ExpenseStatus @default(Pending) // Defined below
+  receiptUrl  String?  // URL or path to the uploaded receipt file
+  status      ExpenseStatus @default(Pending) // Pending, Approved, Rejected
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-
-  // Relations
-  account     Account  @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
 
   @@index([accountId])
   @@index([date])
@@ -66,33 +62,34 @@ enum ExpenseStatus {
 }
 
 
-// === Invoices ===
+// Client Model (for Invoicing)
 model Client {
-  id        String    @id @default(cuid())
+  id        String   @id @default(cuid())
   name      String
-  email     String?   @unique
+  email     String?  @unique
   address   String?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Relations
-  invoices  Invoice[] // A client can have many invoices
+  invoices Invoice[] // A client can have many invoices
 }
 
+// Invoice Model
 model Invoice {
-  id            String       @id @default(cuid())
-  invoiceNumber String       @unique // e.g., INV-0001
-  clientId      String       // Foreign key to Client
+  id            String    @id @default(cuid())
+  invoiceNumber String    @unique // e.g., INV-0001
+  clientId      String    // Foreign key to Client
+  client        Client    @relation(fields: [clientId], references: [id], onDelete: Restrict) // Link to Client
   issueDate     DateTime
   dueDate       DateTime
-  status        InvoiceStatus @default(Draft) // Defined below
+  status        InvoiceStatus @default(Draft) // Draft, Pending, Paid, Overdue, Cancelled
   notes         String?
-  total         Float        // Calculated total amount
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  total         Float     // Calculated total amount
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   // Relations
-  client        Client       @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client if invoices exist
   items         InvoiceItem[] // An invoice has many items
 
   @@index([clientId])
@@ -101,26 +98,23 @@ model Invoice {
   @@index([dueDate])
 }
 
-model InvoiceItem {
-  id          String   @id @default(cuid())
-  invoiceId   String   // Foreign key to Invoice
-  description String
-  quantity    Int
-  unitPrice   Float
-  total       Float // Calculated total for the item (quantity * unitPrice)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  // Relations
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Delete items when invoice is deleted
-
-  @@index([invoiceId])
-}
-
 enum InvoiceStatus {
   Draft
-  Pending // Sent, awaiting payment
+  Pending
   Paid
   Overdue
   Cancelled
+}
+
+// Invoice Item Model
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String  // Foreign key to Invoice
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Link to Invoice
+  description String
+  quantity    Int
+  unitPrice   Float
+  total       Float   // Calculated quantity * unitPrice
+
+  @@index([invoiceId])
 }
