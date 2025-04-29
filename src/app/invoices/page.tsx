@@ -1,3 +1,5 @@
+'use client'; // Add this directive to make it a Client Component
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -69,15 +71,17 @@ export default function InvoicesPage() {
                    <TableCell>{invoice.status}</TableCell>
                   <TableCell className="text-right">${invoice.amount.toFixed(2)}</TableCell>
                    <TableCell className="text-right space-x-1">
-                     <Button variant="ghost" size="icon" className="h-8 w-8">
+                     {/* Placeholder for View Invoice action */}
+                     <Button variant="ghost" size="icon" className="h-8 w-8" title="View Invoice Details">
                         <Eye className="h-4 w-4" />
                         <span className="sr-only">View Invoice</span>
                       </Button>
+                     {/* View PDF Button */}
                      <Button
                        variant="ghost"
                        size="icon"
                        className="h-8 w-8"
-                       onClick={() => handleViewPdf(invoice.invoiceId)}
+                       onClick={() => handleViewPdf(invoice.invoiceId)} // This onClick requires 'use client'
                        title="View PDF"
                       >
                        <FileText className="h-4 w-4" />
