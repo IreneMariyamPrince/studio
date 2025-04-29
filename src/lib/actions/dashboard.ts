@@ -63,6 +63,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     for (const result of results) {
         if (result.status === 'rejected' && result.reason instanceof Prisma.PrismaClientInitializationError) {
             initializationErrorOccurred = true;
+            // Log the specific error message from Prisma
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching dashboard stats subset:", result.reason.message);
             if (result.reason.message.includes('libssl')) {
                  // Log the specific environment issue once
@@ -70,16 +71,16 @@ export async function getDashboardStats(): Promise<DashboardStats> {
             } else {
                 console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs.");
             }
-            // Continue processing other results, but flag that we hit an error
+            // No need to break, flag allows us to return default stats after checking all results
         } else if (result.status === 'rejected') {
             // Log other errors but potentially continue if possible
             console.error("[ACTION_ERROR] Error fetching dashboard data subset:", result.reason);
         }
     }
 
-     // If a critical DB connection error occurred, return defaults immediately.
+     // If a critical DB connection error occurred in *any* of the queries, return defaults immediately.
      if (initializationErrorOccurred) {
-         console.warn("Returning default dashboard stats due to database connection failure.");
+         console.warn("Returning default dashboard stats due to database connection failure (PrismaClientInitializationError).");
          return defaultStats;
      }
 
@@ -127,8 +128,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
          } else {
              console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs.");
          }
+          console.warn("Returning default dashboard stats due to top-level database connection failure.");
      } else {
          console.error("Unexpected error fetching dashboard stats:", error);
+          console.warn("Returning default dashboard stats due to unexpected error.");
      }
     return defaultStats;
   }
@@ -152,7 +155,7 @@ export async function getRecentExpenses(limit = 5) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent expenses:", error.message);
              if (error.message.includes('libssl')) {
-                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Ensure OpenSSL is installed and accessible in your deployment environment. Returning empty list.");
+                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
              } else {
                   console.error("DATABASE CONNECTION FAILED (Recent Expenses): Prisma failed to initialize. Returning empty list.");
              }

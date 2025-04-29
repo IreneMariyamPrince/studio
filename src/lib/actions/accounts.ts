@@ -30,8 +30,8 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         } else {
              console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs. Returning empty list.");
         }
-        // Instead of throwing, log the error and return empty array to prevent page crash
-        return [];
+        // Return empty array to prevent breaking the page, but signal the error
+        return []; // Return empty array instead of throwing
     } else {
         // Log other types of errors
         console.error("[ACTION_ERROR] Error fetching accounts:", error);
