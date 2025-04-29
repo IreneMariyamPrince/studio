@@ -1,4 +1,3 @@
-
 'use client';
 
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
@@ -16,8 +15,10 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { expenseFormSchema, ExpenseFormSchema } from '@/lib/schemas/expense';
-import { getExpenseCategories, addExpense } from '@/lib/actions/expenses'; // Import actions
+import { expenseFormSchema, ExpenseFormSchema, expenseStatus } from '@/lib/schemas/expense';
+import { getExpenseCategories, addExpense } from '@/lib/actions/expenses'; // Import expense actions
+import { getVendors } from '@/lib/actions/vendors'; // Import vendor action
+// import { getTaxRates } from '@/lib/actions/taxRates'; // Import tax rates action (when created)
 import { useToast } from "@/hooks/use-toast";
 import { useRouter } from 'next/navigation'; // To redirect after success
 import {
@@ -28,22 +29,31 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form';
+import { Checkbox } from '@/components/ui/checkbox'; // For isRecurring
 
-type Category = { value: string; label: string };
+type SelectOption = { value: string; label: string };
 
 export default function NewExpensePage() {
-  const [expenseCategories, setExpenseCategories] = useState<Category[]>([]);
+  const [expenseCategories, setExpenseCategories] = useState<SelectOption[]>([]);
+  const [vendors, setVendors] = useState<SelectOption[]>([]);
+  // const [taxRates, setTaxRates] = useState<SelectOption[]>([]); // State for tax rates
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
   const router = useRouter();
 
-  // Fetch categories on component mount
+  // Fetch categories and vendors on component mount
   useEffect(() => {
-    async function fetchCategories() {
-      const categories = await getExpenseCategories();
-      setExpenseCategories(categories);
+    async function fetchData() {
+      const [categoriesData, vendorsData /* , taxRatesData */] = await Promise.all([
+        getExpenseCategories(),
+        getVendors(),
+        // getTaxRates(), // Fetch tax rates when action exists
+      ]);
+      setExpenseCategories(categoriesData);
+      setVendors(vendorsData.map(v => ({ value: v.id!, label: v.name })));
+      // setTaxRates(taxRatesData.map(t => ({ value: t.id!, label: `${t.name} (${t.ratePercent}%)` })));
     }
-    fetchCategories();
+    fetchData();
   }, []);
 
   const form = useForm<ExpenseFormSchema>({
@@ -54,6 +64,10 @@ export default function NewExpensePage() {
       amount: undefined,
       description: '',
       status: 'Pending', // Default status
+      vendorId: undefined,
+      isRecurring: false,
+      recurrenceRule: '',
+      taxRateId: undefined,
       // receiptFile: undefined, // If handling file uploads
     },
   });
@@ -65,18 +79,21 @@ export default function NewExpensePage() {
     Object.entries(data).forEach(([key, value]) => {
       if (value instanceof Date) {
         formData.append(key, value.toISOString()); // Send dates as ISO strings
+      } else if (typeof value === 'boolean') {
+          formData.append(key, value ? 'true' : 'false');
       } else if (value !== undefined && value !== null && !(value instanceof File)) { // Exclude files for now
         formData.append(key, String(value));
       }
     });
 
-    // TODO: Append file if present
-    // if (data.receiptFile) {
-    //   formData.append('receiptFile', data.receiptFile);
-    // }
+     // TODO: Handle file upload - this requires server-side storage setup (e.g., Firebase Storage)
+     // const receiptFile = data.receiptFile?.[0]; // Assuming using react-hook-form register
+     // if (receiptFile) {
+     //     formData.append('receiptFile', receiptFile);
+     // }
 
     startTransition(async () => {
-      const result = await addExpense(formData);
+      const result = await addExpense(formData); // Server action handles DB insertion and file URL saving
       if (result.success) {
         toast({
           title: "Success",
@@ -90,6 +107,12 @@ export default function NewExpensePage() {
           variant: "destructive",
         });
          console.error("Error adding expense:", result.error);
+         // Handle field errors
+         if (result.fieldErrors) {
+             Object.entries(result.fieldErrors).forEach(([field, errors]) => {
+                 form.setError(field as keyof ExpenseFormSchema, { type: 'server', message: errors?.[0] });
+             });
+         }
       }
     });
   };
@@ -171,6 +194,35 @@ export default function NewExpensePage() {
                 )}
               />
 
+             {/* Vendor */}
+              <FormField
+                control={form.control}
+                name="vendorId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Vendor (Optional)</FormLabel>
+                    <Select onValueChange={field.onChange} defaultValue={field.value} value={field.value || ""} disabled={isPending}>
+                      <FormControl>
+                        <SelectTrigger className="w-full md:w-1/2">
+                          <SelectValue placeholder="Select a vendor" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="">-- No Vendor --</SelectItem>
+                        {vendors.length === 0 && <SelectItem value="loading" disabled>Loading vendors...</SelectItem>}
+                        {vendors.map((vendor) => (
+                          <SelectItem key={vendor.value} value={vendor.value}>
+                            {vendor.label}
+                          </SelectItem>
+                        ))}
+                        {/* Consider adding a "Add New Vendor" option here */}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
               {/* Amount */}
                <FormField
                 control={form.control}
@@ -188,7 +240,8 @@ export default function NewExpensePage() {
                             min="0.01"
                             step="0.01"
                             {...field}
-                            onChange={event => field.onChange(+event.target.value)} // Ensure value is number
+                            onChange={event => field.onChange(event.target.value === '' ? undefined : +event.target.value)} // Handle empty string
+                            value={field.value ?? ''} // Control value, handle undefined
                             disabled={isPending}
                           />
                        </FormControl>
@@ -209,6 +262,7 @@ export default function NewExpensePage() {
                        <Textarea
                          placeholder="Enter a brief description of the expense (optional)"
                          {...field}
+                         value={field.value ?? ''} // Handle undefined
                          disabled={isPending}
                        />
                      </FormControl>
@@ -217,7 +271,37 @@ export default function NewExpensePage() {
                  )}
                />
 
-              {/* Receipt Upload (Placeholder UI - Needs functional implementation) */}
+             {/* Tax Rate (Optional) */}
+              <FormField
+                control={form.control}
+                name="taxRateId"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Tax Rate (Optional)</FormLabel>
+                     <Select onValueChange={field.onChange} defaultValue={field.value} value={field.value || ""} disabled={isPending}>
+                       <FormControl>
+                         <SelectTrigger className="w-full md:w-1/2">
+                           <SelectValue placeholder="Select a tax rate" />
+                         </SelectTrigger>
+                       </FormControl>
+                       <SelectContent>
+                           <SelectItem value="">-- No Tax --</SelectItem>
+                           {/* {taxRates.length === 0 && <SelectItem value="loading" disabled>Loading tax rates...</SelectItem>}
+                           {taxRates.map((rate) => (
+                             <SelectItem key={rate.value} value={rate.value}>
+                               {rate.label}
+                             </SelectItem>
+                           ))} */}
+                           <SelectItem value="coming_soon" disabled>Tax Rates Coming Soon</SelectItem>
+                       </SelectContent>
+                     </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+
+              {/* Receipt Upload */}
               <div className="space-y-2">
                 <Label htmlFor="receipt">Receipt (Optional)</Label>
                 <div className="flex items-center justify-center w-full">
@@ -227,22 +311,68 @@ export default function NewExpensePage() {
                         "flex flex-col items-center justify-center w-full h-32 border-2 border-border border-dashed rounded-lg cursor-pointer bg-muted/50",
                         isPending ? "cursor-not-allowed opacity-50" : "hover:bg-muted/80"
                     )}
-
                   >
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                       <Upload className="w-8 h-8 mb-3 text-muted-foreground" />
                       <p className="mb-2 text-sm text-muted-foreground">
                         <span className="font-semibold">Click to upload</span> or drag and drop
                       </p>
-                      <p className="text-xs text-muted-foreground">PNG, JPG, PDF (MAX. 5MB)</p>
+                      <p className="text-xs text-muted-foreground">PNG, JPG, PDF (MAX. 5MB) - Firebase Storage Setup Required</p>
                     </div>
                      {/* Input is controlled by react-hook-form if using file handling */}
-                     <Input id="receipt-upload" type="file" className="hidden" disabled={isPending} /* {...form.register('receiptFile')} */ />
-                     {/* Display selected file name or errors */}
+                     <Input id="receipt-upload" type="file" className="hidden" disabled={isPending /* || !firebaseConfigured */} /* {...form.register('receiptFile')} */ />
                   </Label>
                 </div>
-                {/* <FormMessage>{form.formState.errors.receiptFile?.message}</FormMessage> */}
+                 {/* <FormMessage>{form.formState.errors.receiptFile?.message}</FormMessage> */}
               </div>
+
+             {/* Recurring Expense */}
+             <FormField
+                control={form.control}
+                name="isRecurring"
+                render={({ field }) => (
+                    <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4 shadow">
+                    <FormControl>
+                        <Checkbox
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                        disabled={isPending}
+                        />
+                    </FormControl>
+                    <div className="space-y-1 leading-none">
+                        <FormLabel>
+                        Recurring Expense
+                        </FormLabel>
+                        <FormDescription>
+                        Mark this if the expense occurs regularly. (Rule setup coming soon)
+                        </FormDescription>
+                    </div>
+                     <FormMessage />
+                    </FormItem>
+                )}
+                />
+                {/* Conditionally show Recurrence Rule input */}
+                {form.watch('isRecurring') && (
+                     <FormField
+                     control={form.control}
+                     name="recurrenceRule"
+                     render={({ field }) => (
+                       <FormItem>
+                         <FormLabel>Recurrence Rule (Optional)</FormLabel>
+                         <FormControl>
+                           <Input
+                             placeholder="e.g., FREQ=MONTHLY;INTERVAL=1 (RRULE format - coming soon)"
+                             {...field}
+                             value={field.value ?? ''}
+                             disabled={true /* Enable when parsing logic is added */}
+                           />
+                         </FormControl>
+                         <FormMessage />
+                       </FormItem>
+                     )}
+                   />
+                )}
+
 
             </CardContent>
             <CardFooter className="flex justify-end gap-2">

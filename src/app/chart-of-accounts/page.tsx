@@ -1,8 +1,8 @@
-
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { PlusCircle, Edit, Trash2 } from 'lucide-react';
+import { Badge } from '@/components/ui/badge'; // Import Badge
 import {
   Table,
   TableHeader,
@@ -17,17 +17,20 @@ import type { AccountSchema } from '@/lib/schemas/account';
 import { AddAccountDialog } from './_components/add-account-dialog';
 import { EditAccountDialog } from './_components/edit-account-dialog';
 import { DeleteAccountDialog } from './_components/delete-account-dialog';
-import 'server-only'; // Ensure this component runs only on the server for initial data fetching
+import 'server-only';
+
+function formatCurrency(amount: number | null | undefined): string {
+  if (amount == null) return '-';
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
+}
 
 export default async function ChartOfAccountsPage() {
-  // Fetch accounts on the server during initial render
   const accounts: AccountSchema[] = await getAccounts();
 
   return (
     <DashboardLayout>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Chart of Accounts</h1>
-        {/* AddAccountDialog manages its own state and triggers the server action */}
         <AddAccountDialog>
           <Button>
             <PlusCircle className="mr-2 h-4 w-4" /> Add New Account
@@ -49,7 +52,9 @@ export default async function ChartOfAccountsPage() {
                 <TableHead>Account Name</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Description</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                 <TableHead>Status</TableHead> {/* Added Status */}
+                 <TableHead className="text-right">Balance</TableHead> {/* Added Balance */}
+                <TableHead className="text-right w-[120px]">Actions</TableHead> {/* Adjusted width */}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -58,16 +63,25 @@ export default async function ChartOfAccountsPage() {
                   <TableCell className="font-medium">{account.code}</TableCell>
                   <TableCell>{account.name}</TableCell>
                   <TableCell>{account.type}</TableCell>
-                  <TableCell>{account.description || '-'}</TableCell>
+                  <TableCell className="max-w-[200px] truncate" title={account.description}>{account.description || '-'}</TableCell>
+                   <TableCell>
+                     <Badge variant={account.isActive ? 'default' : 'outline'}>
+                         {account.isActive ? 'Active' : 'Inactive'}
+                     </Badge>
+                   </TableCell>
+                   <TableCell className="text-right">
+                     {/* Show balance only for relevant account types */}
+                     {['Asset', 'Liability', 'Equity'].includes(account.type)
+                       ? formatCurrency(account.balance)
+                       : '-'}
+                   </TableCell>
                   <TableCell className="text-right space-x-1">
-                    {/* EditAccountDialog takes the account data */}
                     <EditAccountDialog account={account}>
                        <Button variant="ghost" size="icon" className="h-8 w-8">
                          <Edit className="h-4 w-4" />
                          <span className="sr-only">Edit Account</span>
                        </Button>
                      </EditAccountDialog>
-                    {/* DeleteAccountDialog takes account id and name */}
                      <DeleteAccountDialog accountId={account.id!} accountName={account.name}>
                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
                          <Trash2 className="h-4 w-4" />
@@ -79,7 +93,7 @@ export default async function ChartOfAccountsPage() {
               ))}
               {accounts.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={5} className="h-24 text-center">
+                  <TableCell colSpan={7} className="h-24 text-center"> {/* Increased colspan */}
                     No accounts found. Add a new account to get started.
                   </TableCell>
                 </TableRow>

@@ -1,17 +1,7 @@
-
 import { z } from 'zod';
-import { accountSchema } from './account'; // If linking expenses to accounts
-
-export const clientSchema = z.object({
-  id: z.string().cuid(),
-  name: z.string().min(2, { message: "Client name must be at least 2 characters." }),
-  email: z.string().email({ message: "Invalid email address." }).optional().or(z.literal('')), // Allow empty string or valid email
-  address: z.string().optional(),
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
-});
-
-export type ClientSchema = z.infer<typeof clientSchema>;
+import { clientSchema } from './client'; // Import Client schema
+import { taxRateSchema } from './taxRate'; // Import TaxRate schema
+import { accountSchema } from './account'; // Import Account schema
 
 export const invoiceItemSchema = z.object({
   id: z.string().cuid().optional(), // Optional for creation
@@ -19,41 +9,61 @@ export const invoiceItemSchema = z.object({
   description: z.string().min(1, { message: "Item description cannot be empty." }),
   quantity: z.coerce.number().int().positive({ message: "Quantity must be positive." }),
   unitPrice: z.coerce.number().nonnegative({ message: "Unit price cannot be negative." }),
-  total: z.coerce.number().optional(), // Calculated field
+  total: z.coerce.number().optional(), // Calculated field (quantity * unitPrice + tax)
+  taxRateId: z.string().cuid().optional(), // Optional link to TaxRate
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
+
+  // Optional relation data
+  // taxRate: taxRateSchema.optional(),
 });
 
 export type InvoiceItemSchema = z.infer<typeof invoiceItemSchema>;
 
-export const invoiceStatus = ['Draft', 'Pending', 'Paid', 'Overdue', 'Cancelled'] as const;
+export const invoiceStatus = ['Draft', 'Pending', 'Paid', 'Partial', 'Overdue', 'Cancelled'] as const;
 
 export const invoiceSchema = z.object({
   id: z.string().cuid().optional(), // Optional for creation
   invoiceNumber: z.string().optional(), // Generated on creation
   clientId: z.string().cuid({ message: "Please select a client." }),
-  client: clientSchema.optional(), // Included from relation
   issueDate: z.coerce.date({ required_error: "Issue date is required." }),
   dueDate: z.coerce.date({ required_error: "Due date is required." }),
   status: z.enum(invoiceStatus),
   notes: z.string().optional(),
   items: z.array(invoiceItemSchema).min(1, { message: "Invoice must have at least one item." }),
-  total: z.coerce.number().optional(), // Calculated field
+  total: z.coerce.number().optional(), // Calculated field (sum of item totals)
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
+  revenueAccountId: z.string().cuid().optional(), // Optional link to revenue account
+
+  // Related data included from Prisma fetches
+  client: clientSchema.optional(),
+  // revenueAccount: accountSchema.optional(), // Define accountSchema if needed here
 });
 
 export type InvoiceSchema = z.infer<typeof invoiceSchema>;
 
-// Schema for creating/updating an invoice (might differ slightly)
+// Schema for creating/updating an invoice form
 export const invoiceFormSchema = invoiceSchema.omit({
     id: true,
     invoiceNumber: true,
     createdAt: true,
     updatedAt: true,
-    client: true, // Client is linked via clientId
-    total: true,   // Total is calculated
-    // Items might be handled differently in the form (e.g., separate state)
+    client: true, // Client linked via clientId
+    // revenueAccount: true, // Linked via revenueAccountId
+    total: true,   // Total is calculated server-side
+    items: true, // Items handled separately in UI/form logic (e.g., useFieldArray or JSON string)
 }).extend({
-    items: z.string() // Expect items as a JSON string in the form
+    // Typically, items are managed in UI state and converted before submission
+    // Example: Expecting items as a JSON string from the form
+    items: z.string().refine(val => {
+        try {
+            const parsed = JSON.parse(val);
+            return Array.isArray(parsed) && parsed.length > 0;
+        } catch (e) {
+            return false;
+        }
+    }, { message: "Invoice must have at least one item (valid JSON format required)." }),
 });
 
 export type InvoiceFormSchema = z.infer<typeof invoiceFormSchema>;

@@ -1,4 +1,3 @@
-
 'use client';
 
 import type { ReactNode } from 'react';
@@ -11,18 +10,18 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { AccountForm } from '@/components/chart-of-accounts/account-form';
+import { AccountForm } from './account-form'; // Use local form component
 import { updateAccount } from '@/lib/actions/accounts';
-import type { AccountSchema } from '@/lib/schemas/account';
+import type { AccountSchema, AccountFormSchema } from '@/lib/schemas/account'; // Import both schemas
 import { useToast } from "@/hooks/use-toast";
-import { Button } from '@/components/ui/button'; // Import Button for DialogFooter
-import { useForm } from 'react-hook-form'; // Import useForm
-import { zodResolver } from '@hookform/resolvers/zod'; // Import zodResolver
-import { accountSchema } from '@/lib/schemas/account'; // Import the schema itself
+import { Button } from '@/components/ui/button';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { accountFormSchema } from '@/lib/schemas/account'; // Import the form schema
 
 interface EditAccountDialogProps {
   children: ReactNode; // Trigger element (e.g., Edit button)
-  account: AccountSchema;
+  account: AccountSchema; // Pass the full AccountSchema for initial data
 }
 
 export function EditAccountDialog({ children, account }: EditAccountDialogProps) {
@@ -30,54 +29,69 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
 
-  // Initialize react-hook-form for the edit form
-  const form = useForm<AccountSchema>({
-    resolver: zodResolver(accountSchema), // Use the full schema including id for validation context
-    defaultValues: account, // Pre-fill with existing account data
+  // Prepare default values for the form schema from the full account schema
+   const defaultFormValues: AccountFormSchema = {
+       code: account.code,
+       name: account.name,
+       type: account.type,
+       description: account.description ?? '', // Ensure string or empty string
+       isActive: account.isActive ?? true,
+   };
+
+  // Initialize react-hook-form with the form schema and prepared defaults
+  const form = useForm<AccountFormSchema>({
+    resolver: zodResolver(accountFormSchema),
+    defaultValues: defaultFormValues,
   });
 
-  // Reset form when dialog opens or closes, or when account data changes externally
+  // Reset form when dialog opens or account data changes externally
   useEffect(() => {
       if (isOpen) {
-          form.reset(account); // Reset form with current account data when dialog opens
+          // Re-calculate defaults in case account prop changed
+          const currentDefaultValues: AccountFormSchema = {
+               code: account.code,
+               name: account.name,
+               type: account.type,
+               description: account.description ?? '',
+               isActive: account.isActive ?? true,
+           };
+          form.reset(currentDefaultValues);
       }
-  }, [isOpen, account, form]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, account]); // form.reset removed from dependencies
 
 
-  const onSubmit = (data: AccountSchema) => {
-     form.clearErrors(); // Clear previous errors
+  const onSubmit = (data: AccountFormSchema) => {
+     form.clearErrors();
      const formData = new FormData();
-     // Ensure the account ID is included
-     formData.append('id', account.id!); // Use the original account ID
+     formData.append('id', account.id!); // Add the ID for the update action
 
      Object.entries(data).forEach(([key, value]) => {
-        // Append other fields, ensure id isn't duplicated if present in `data`
-        if (key !== 'id' && value !== undefined && value !== null) {
-            formData.append(key, String(value));
-        }
+        if (typeof value === 'boolean') {
+         formData.append(key, value ? 'true' : 'false');
+       } else if (value !== undefined && value !== null && value !== '') { // Append non-empty strings/numbers
+         formData.append(key, String(value));
+       }
      });
 
     startTransition(async () => {
       const result = await updateAccount(formData);
       if (result.success) {
         setIsOpen(false);
-        // No need to reset form here, useEffect handles it on close/reopen
         toast({
           title: "Success",
           description: result.message,
         });
-        // Revalidation handled by server action
       } else {
          toast({
           title: "Error Updating Account",
           description: result.message || "An unexpected error occurred.",
           variant: "destructive",
         });
-        // Set form errors if fieldErrors object is returned
         if (result.fieldErrors) {
           Object.entries(result.fieldErrors).forEach(([fieldName, errors]) => {
             if (errors && errors.length > 0) {
-              form.setError(fieldName as keyof AccountSchema, {
+              form.setError(fieldName as keyof AccountFormSchema, {
                 type: 'server',
                 message: errors[0],
               });
@@ -90,8 +104,8 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
   };
 
   const handleOpenChange = (open: boolean) => {
-     // Resetting is now handled by useEffect based on `isOpen` state
      setIsOpen(open);
+     // Resetting is handled by useEffect based on `isOpen` state
   }
 
   return (
@@ -105,11 +119,10 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
           </DialogDescription>
         </DialogHeader>
         <AccountForm
-          form={form} // Pass the form instance
-          onSubmit={onSubmit} // Pass the onSubmit handler
+          form={form}
+          onSubmit={onSubmit}
           isPending={isPending}
-          onCancel={() => handleOpenChange(false)} // Use handler for consistent close logic
-          // Default values are set in useForm initialization and useEffect
+          onCancel={() => handleOpenChange(false)}
           submitButtonText="Save Changes"
         />
       </DialogContent>

@@ -1,4 +1,3 @@
-
 'use client';
 
 import type { ReactNode } from 'react';
@@ -11,14 +10,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { AccountForm } from '@/components/chart-of-accounts/account-form';
+import { AccountForm } from './account-form'; // Use local form component
 import { addAccount } from '@/lib/actions/accounts';
 import { useToast } from "@/hooks/use-toast";
-import { Button } from '@/components/ui/button'; // Import Button for DialogFooter
-import { useForm } from 'react-hook-form'; // Import useForm for managing form state, including errors
-import type { AccountSchema } from '@/lib/schemas/account'; // Import AccountSchema type
-import { zodResolver } from '@hookform/resolvers/zod'; // Import zodResolver
-import { accountSchema } from '@/lib/schemas/account'; // Import the schema itself
+import { Button } from '@/components/ui/button';
+import { useForm } from 'react-hook-form';
+import type { AccountFormSchema } from '@/lib/schemas/account'; // Import AccountFormSchema type
+import { zodResolver } from '@hookform/resolvers/zod';
+import { accountFormSchema } from '@/lib/schemas/account'; // Import the form schema itself
 
 interface AddAccountDialogProps {
   children: ReactNode; // Trigger element
@@ -29,26 +28,30 @@ export function AddAccountDialog({ children }: AddAccountDialogProps) {
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
 
-  // Initialize react-hook-form
-  const form = useForm<AccountSchema>({
-    resolver: zodResolver(accountSchema.omit({ id: true })), // Use schema for validation
+  // Initialize react-hook-form with the form schema
+  const form = useForm<AccountFormSchema>({
+    resolver: zodResolver(accountFormSchema),
     defaultValues: {
       code: '',
       name: '',
       type: undefined,
       description: '',
+      isActive: true, // Default to active
     },
   });
 
-  // Function to handle form submission via the server action
-  const onSubmit = (data: AccountSchema) => {
-    form.clearErrors(); // Clear previous errors
+  const onSubmit = (data: AccountFormSchema) => {
+    form.clearErrors();
     const formData = new FormData();
     Object.entries(data).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        formData.append(key, String(value));
-      }
-    });
+       // Handle boolean specifically for FormData
+       if (typeof value === 'boolean') {
+         formData.append(key, value ? 'true' : 'false');
+       } else if (value !== undefined && value !== null && value !== '') { // Append non-empty strings/numbers
+         formData.append(key, String(value));
+       }
+     });
+
 
     startTransition(async () => {
       const result = await addAccount(formData);
@@ -59,21 +62,18 @@ export function AddAccountDialog({ children }: AddAccountDialogProps) {
           title: "Success",
           description: result.message,
         });
-        // Revalidation is handled by the server action
       } else {
-        // Display general error message
         toast({
           title: "Error Adding Account",
           description: result.message || "An unexpected error occurred.",
           variant: "destructive",
         });
-        // Set form errors if fieldErrors object is returned
         if (result.fieldErrors) {
           Object.entries(result.fieldErrors).forEach(([fieldName, errors]) => {
             if (errors && errors.length > 0) {
-              form.setError(fieldName as keyof AccountSchema, {
+              form.setError(fieldName as keyof AccountFormSchema, {
                 type: 'server',
-                message: errors[0], // Display the first error message for the field
+                message: errors[0],
               });
             }
           });
@@ -83,10 +83,9 @@ export function AddAccountDialog({ children }: AddAccountDialogProps) {
     });
   };
 
-  // Reset form when dialog is closed or opened
   const handleOpenChange = (open: boolean) => {
      if (!open) {
-         form.reset(); // Reset form when closing
+         form.reset();
      }
      setIsOpen(open);
   }
@@ -101,12 +100,11 @@ export function AddAccountDialog({ children }: AddAccountDialogProps) {
             Enter the details for the new financial account.
           </DialogDescription>
         </DialogHeader>
-        {/* Pass form context and onSubmit handler to AccountForm */}
         <AccountForm
-          form={form} // Pass the form instance
-          onSubmit={onSubmit} // Pass the onSubmit handler
+          form={form}
+          onSubmit={onSubmit}
           isPending={isPending}
-          onCancel={() => handleOpenChange(false)} // Use handler to reset form
+          onCancel={() => handleOpenChange(false)}
           submitButtonText="Create Account"
         />
       </DialogContent>

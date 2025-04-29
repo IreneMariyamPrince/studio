@@ -2,76 +2,61 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider      = "prisma-client-js"
-  // Explicitly define binary targets. Add 'native' to potentially use a locally built engine.
-  // Keep the debian target as it's often needed for deployment environments.
-  binaryTargets = ["native", "debian-openssl-1.1.x"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "mysql"
-  // Ensure the DATABASE_URL environment variable is set correctly
-  // Example: DATABASE_URL="mysql://user:password@host:port/database"
-  url      = env("DATABASE_URL")
+  url      = env("DATABASE_URL") // Ensure DATABASE_URL is set in your .env file
 }
 
-// --- Chart of Accounts ---
+// --- Core Financial Models ---
+
 model Account {
-  id          String    @id @default(cuid())
-  code        String    @unique // Unique account code (e.g., 1010, 6050)
-  name        String    // Account name (e.g., Cash, Office Supplies)
-  type        String    // Account type (Asset, Liability, Equity, Revenue, Expense)
-  description String?   // Optional description
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  expenses    Expense[] // Relation to Expenses
+  id          String   @id @default(cuid())
+  code        String   @unique // e.g., 1010, 6050
+  name        String   // e.g., Cash, Office Supplies Expense
+  type        AccountType // Defined below
+  description String?
+  balance     Decimal  @default(0.00) @db.Decimal(12, 2) // For Balance Sheet accounts
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  expenses         Expense[] // Expenses categorized under this account
+  journalEntryLines JournalEntryLine[] // Journal entries affecting this account
+  budgets          Budget[] // Budgets set for this account
 
   @@index([type])
 }
 
-// --- Expenses ---
-model Expense {
-  id          String    @id @default(cuid())
-  date        DateTime  // Date the expense occurred
-  accountId   String    // Foreign key linking to the Account
-  account     Account   @relation(fields: [accountId], references: [id])
-  amount      Float     // Amount of the expense
-  description String?   // Optional description
-  receiptUrl  String?   // Optional URL to the receipt image/PDF
-  status      String    // Status (e.g., Pending, Approved, Rejected)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-
-  @@index([accountId])
-  @@index([date])
-  @@index([status])
+enum AccountType {
+  Asset
+  Liability
+  Equity
+  Revenue
+  Expense
 }
 
-// --- Clients ---
-model Client {
-  id        String   @id @default(cuid())
-  name      String   // Client's name
-  email     String?  @unique // Client's email (optional but unique if provided)
-  address   String?  // Client's address (optional)
-  invoices  Invoice[] // Relation to Invoices
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-// --- Invoices ---
 model Invoice {
   id            String       @id @default(cuid())
-  invoiceNumber String       @unique // Unique invoice number (e.g., INV-0001)
-  clientId      String       // Foreign key linking to the Client
-  client        Client       @relation(fields: [clientId], references: [id])
-  issueDate     DateTime     // Date the invoice was issued
-  dueDate       DateTime     // Date the invoice is due
-  status        String       // Status (e.g., Draft, Pending, Paid, Overdue, Cancelled)
-  notes         String?      // Optional notes for the client
-  total         Float        // Total amount of the invoice
-  items         InvoiceItem[] // Relation to InvoiceItems
+  invoiceNumber String       @unique // e.g., INV-0001
+  clientId      String
+  issueDate     DateTime
+  dueDate       DateTime
+  status        InvoiceStatus @default(Draft)
+  total         Decimal      @db.Decimal(12, 2)
+  notes         String?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
+
+  // Relations
+  client    Client         @relation(fields: [clientId], references: [id], onDelete: Restrict) // Prevent deleting client if invoices exist
+  items     InvoiceItem[]
+  payments  Payment[] // Payments applied to this invoice
+  revenueAccountId String?  // Optional: Link to a specific Revenue account
+  revenueAccount Account? @relation("InvoiceRevenueAccount", fields: [revenueAccountId], references: [id], onDelete: SetNull)
 
   @@index([clientId])
   @@index([status])
@@ -79,15 +64,252 @@ model Invoice {
   @@index([dueDate])
 }
 
-// --- Invoice Items ---
 model InvoiceItem {
-  id          String  @id @default(cuid())
-  invoiceId   String  // Foreign key linking to the Invoice
-  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Cascade delete items when invoice is deleted
-  description String  // Description of the item/service
-  quantity    Int     // Quantity
-  unitPrice   Float   // Price per unit
-  total       Float   // Calculated total for the item (quantity * unitPrice)
+  id          String   @id @default(cuid())
+  invoiceId   String
+  description String
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  total       Decimal  @db.Decimal(12, 2) // quantity * unitPrice (potentially + tax)
+  taxRateId   String?  // Optional link to TaxRate
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // Delete items if invoice is deleted
+  taxRate TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull)
 
   @@index([invoiceId])
+}
+
+enum InvoiceStatus {
+  Draft
+  Pending // Sent, awaiting payment
+  Paid
+  Partial // Partially paid
+  Overdue
+  Cancelled
+}
+
+model Expense {
+  id          String        @id @default(cuid())
+  date        DateTime
+  accountId   String // Link to Expense account type in Chart of Accounts
+  amount      Decimal       @db.Decimal(12, 2)
+  description String?
+  receiptUrl  String? // URL from Firebase Storage
+  status      ExpenseStatus @default(Pending)
+  vendorId    String? // Link to Vendor
+  isRecurring Boolean       @default(false) // Flag for recurring expenses
+  recurrenceRule String?    // e.g., "FREQ=MONTHLY;INTERVAL=1" (iCalendar RRULE) - requires parsing logic
+  taxRateId   String?       // Optional link to TaxRate
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Relations
+  account Account @relation(fields: [accountId], references: [id], onDelete: Restrict) // Prevent deleting account if expenses exist
+  vendor  Vendor? @relation(fields: [vendorId], references: [id], onDelete: SetNull) // Allow unsetting vendor
+  payments Payment[] // Payments made for this expense (if tracking vendor payments)
+  taxRate TaxRate? @relation(fields: [taxRateId], references: [id], onDelete: SetNull)
+
+  @@index([accountId])
+  @@index([date])
+  @@index([status])
+  @@index([vendorId])
+}
+
+enum ExpenseStatus {
+  Pending
+  Approved
+  Rejected
+  Paid // If tracking payments against expenses
+}
+
+// --- Supporting Models ---
+
+model Client {
+  id           String    @id @default(cuid())
+  name         String
+  email        String?   @unique
+  phone        String?
+  address      String?
+  paymentTerms String?   // e.g., "Net 30"
+  balanceDue   Decimal   @default(0.00) @db.Decimal(12, 2) // Calculated field, maybe update via triggers or actions
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Relations
+  invoices Invoice[]
+}
+
+model Vendor {
+  id           String    @id @default(cuid())
+  name         String
+  email        String?   @unique
+  phone        String?
+  address      String?
+  paymentTerms String?
+  balanceOwed  Decimal   @default(0.00) @db.Decimal(12, 2) // Calculated field
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Relations
+  expenses Expense[]
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  paymentDate    DateTime
+  amount         Decimal       @db.Decimal(12, 2)
+  paymentMethod  String // e.g., "Credit Card", "Bank Transfer", "Cash"
+  reference      String? // e.g., Check number, Transaction ID
+  notes          String?
+  bankAccountId  String // Account where payment was deposited/withdrawn
+  invoiceId      String? // If paying an invoice
+  expenseId      String? // If paying an expense (optional, depending on workflow)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  // Relations
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  invoice     Invoice?    @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  expense     Expense?    @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+
+  @@index([bankAccountId])
+  @@index([invoiceId])
+  @@index([expenseId])
+  @@index([paymentDate])
+}
+
+model BankAccount {
+  id            String    @id @default(cuid())
+  name          String // e.g., "Checking Account", "Savings Account"
+  accountNumber String? // Masked or partial number for identification
+  bankName      String?
+  balance       Decimal   @default(0.00) @db.Decimal(12, 2)
+  currency      String    @default("USD") // Consider making this configurable
+  isDefault     Boolean   @default(false) // Maybe one default account
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  payments Payment[] // Payments made from/to this account
+  // reconciliationLogs ReconciliationLog[] // Link to reconciliation logs (future feature)
+
+  @@index([name])
+}
+
+// --- Double-Entry & Adjustments ---
+
+model JournalEntry {
+  id           String    @id @default(cuid())
+  entryDate    DateTime
+  description  String
+  reference    String?   // Optional reference number
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  createdById  String?   // Link to User who created it
+
+  // Relations
+  lines        JournalEntryLine[]
+  createdBy    User?      @relation("CreatedJournalEntries", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([entryDate])
+}
+
+model JournalEntryLine {
+  id             String     @id @default(cuid())
+  journalEntryId String
+  accountId      String
+  type           EntryType // Debit or Credit
+  amount         Decimal    @db.Decimal(12, 2)
+  description    String? // Optional line-specific description
+  createdAt      DateTime   @default(now())
+
+  // Relations
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([journalEntryId])
+  @@index([accountId])
+}
+
+enum EntryType {
+  Debit
+  Credit
+}
+
+// --- Planning & Control ---
+
+model Budget {
+  id         String    @id @default(cuid())
+  accountId  String
+  period     String // e.g., "2024-01", "2024" (Yearly)
+  amount     Decimal   @db.Decimal(12, 2)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  // Relations
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, period]) // Only one budget per account per period
+  @@index([accountId])
+  @@index([period])
+}
+
+// --- User & Audit ---
+
+model User {
+  id            String       @id @default(cuid()) // Or use Firebase UID directly if preferred
+  firebaseUid   String?      @unique // Store Firebase UID for linking
+  email         String       @unique
+  name          String?
+  role          UserRole     @default(Viewer)
+  isActive      Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  // Relations
+  auditLogs          AuditLog[] @relation("UserAuditLogs")
+  createdJournalEntries JournalEntry[] @relation("CreatedJournalEntries")
+  // Add other relations like created invoices/expenses if needed
+}
+
+enum UserRole {
+  Admin
+  Accountant
+  Viewer
+}
+
+model AuditLog {
+  id        String    @id @default(cuid())
+  timestamp DateTime  @default(now())
+  userId    String?   // User performing the action
+  action    String // e.g., "create_invoice", "update_expense", "delete_account"
+  entity    String // e.g., "Invoice", "Expense", "Account"
+  entityId  String? // ID of the affected entity
+  details   Json? // Store old/new values or other context as JSON
+
+  // Relations
+  user User? @relation("UserAuditLogs", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([timestamp])
+  @@index([userId])
+  @@index([entity, entityId])
+}
+
+// --- Configuration ---
+
+model TaxRate {
+  id          String   @id @default(cuid())
+  name        String   // e.g., "VAT", "GST", "Sales Tax"
+  ratePercent Decimal  @db.Decimal(5, 2) // e.g., 20.00 for 20%
+  description String?
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  invoiceItems InvoiceItem[]
+  expenses     Expense[]
 }
