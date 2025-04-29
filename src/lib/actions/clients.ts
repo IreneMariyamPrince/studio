@@ -15,8 +15,32 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get Clients ---
 export async function getClients(): Promise<ClientSchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const clients = await prisma.client.findMany({
         orderBy: { name: 'asc' }
@@ -28,24 +52,24 @@ export async function getClients(): Promise<ClientSchema[]> {
         phone: client.phone ?? undefined,
         address: client.address ?? undefined,
         paymentTerms: client.paymentTerms ?? undefined,
+        balanceDue: client.balanceDue?.toNumber() ?? 0, // Handle Decimal
     }));
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching clients:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
-         } else {
-              console.error("Database connection failed. Returning empty list.");
-         }
-        return [];
-    }
-    console.error("[ACTION_ERROR] Error fetching clients:", error);
+     if (checkPrismaInitError(error, 'getClients')) {
+          console.warn("Returning empty clients list due to database connection failure.");
+     } else {
+        console.error("[ACTION_ERROR] Error fetching clients:", error);
+     }
     return [];
   }
 }
 
 // --- Add Client ---
 export async function addClient(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
   const validatedFields = clientFormSchema.safeParse({
@@ -71,9 +95,13 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
     revalidatePath('/invoices/new'); // Revalidate new invoice page if client dropdown is there
     return { success: true, message: `Client "${newClient.name}" added successfully.`, data: newClient };
   } catch (error: unknown) {
+    if (checkPrismaInitError(error, 'addClient')) {
+        return { success: false, message: 'Database Connection Error. Failed to add client.', error: 'Initialization Error' };
+    }
+
     console.error("[DB_ERROR] Failed to add client:", error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      if (error.code === 'P2002' && error.meta?.target === 'Client_email_key') {
+      if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email') ) {
         return {
             success: false,
             message: 'Database Error: A client with this email already exists.',
@@ -81,16 +109,6 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
             fieldErrors: { email: ['This email is already registered.'] }
          };
       }
-    } else if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[DB_ERROR] Prisma Initialization Error during client creation:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-         }
-        return {
-            success: false,
-            message: 'Database Connection Error. Failed to add client.',
-            error: 'Initialization Error'
-        };
     }
     return {
         success: false,

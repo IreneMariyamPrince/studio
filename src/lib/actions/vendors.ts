@@ -15,8 +15,32 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get Vendors ---
 export async function getVendors(): Promise<VendorSchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const vendors = await prisma.vendor.findMany({
         orderBy: { name: 'asc' }
@@ -28,24 +52,24 @@ export async function getVendors(): Promise<VendorSchema[]> {
         phone: vendor.phone ?? undefined,
         address: vendor.address ?? undefined,
         paymentTerms: vendor.paymentTerms ?? undefined,
+        balanceOwed: vendor.balanceOwed?.toNumber() ?? 0, // Handle Decimal
     }));
   } catch (error) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching vendors:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
-         } else {
-              console.error("Database connection failed. Returning empty list.");
-         }
-        return [];
-    }
-    console.error("[ACTION_ERROR] Error fetching vendors:", error);
+     if (checkPrismaInitError(error, 'getVendors')) {
+          console.warn("Returning empty vendors list due to database connection failure.");
+     } else {
+        console.error("[ACTION_ERROR] Error fetching vendors:", error);
+     }
     return [];
   }
 }
 
 // --- Add Vendor ---
 export async function addVendor(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
   const validatedFields = vendorFormSchema.safeParse({
@@ -71,9 +95,12 @@ export async function addVendor(formData: FormData): Promise<ActionResult> {
     revalidatePath('/expenses/new'); // Revalidate new expense page if vendor dropdown is there
     return { success: true, message: `Vendor "${newVendor.name}" added successfully.`, data: newVendor };
   } catch (error: unknown) {
+    if (checkPrismaInitError(error, 'addVendor')) {
+        return { success: false, message: 'Database Connection Error. Failed to add vendor.', error: 'Initialization Error' };
+    }
      console.error("[DB_ERROR] Failed to add vendor:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-       if (error.code === 'P2002' && error.meta?.target === 'Vendor_email_key') {
+       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email')) {
          return {
              success: false,
              message: 'Database Error: A vendor with this email already exists.',
@@ -81,17 +108,7 @@ export async function addVendor(formData: FormData): Promise<ActionResult> {
              fieldErrors: { email: ['This email is already registered.'] }
           };
        }
-     } else if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[DB_ERROR] Prisma Initialization Error during vendor creation:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-         }
-        return {
-            success: false,
-            message: 'Database Connection Error. Failed to add vendor.',
-            error: 'Initialization Error'
-        };
-    }
+     }
     return {
         success: false,
         message: 'Database Error: Failed to add vendor.',

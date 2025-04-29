@@ -15,8 +15,32 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get Payments ---
 export async function getPayments(): Promise<PaymentSchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const payments = await prisma.payment.findMany({
         orderBy: { paymentDate: 'desc' },
@@ -38,22 +62,21 @@ export async function getPayments(): Promise<PaymentSchema[]> {
     }));
     // return payments as PaymentSchema[]; // Cast if validation is too complex for now
   } catch (error) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching payments:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
-         } else {
-              console.error("Database connection failed. Returning empty list.");
-         }
-        return [];
+    if (checkPrismaInitError(error, 'getPayments')) {
+        console.warn("Returning empty payments list due to database connection failure.");
+    } else {
+        console.error("[ACTION_ERROR] Error fetching payments:", error);
     }
-    console.error("[ACTION_ERROR] Error fetching payments:", error);
     return [];
   }
 }
 
 // --- Add Payment ---
 export async function addPayment(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
   // TODO: Add logic to determine if payment is for invoice or expense if needed
@@ -137,6 +160,10 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
     return { success: true, message: 'Payment recorded successfully.', data: result };
 
   } catch (error: unknown) {
+     if (checkPrismaInitError(error, 'addPayment Transaction')) {
+        return { success: false, message: 'Database Connection Error. Failed to record payment.', error: 'Initialization Error' };
+     }
+
      console.error("[DB_ERROR] Failed to record payment transaction:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         // Handle specific errors like invalid foreign keys (bankAccountId, invoiceId, expenseId)
@@ -147,16 +174,6 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
         if (error.code === 'P2025') { // Record to update not found (e.g., bank account)
              return { success: false, message: 'Database Error: Could not find related record to update.', error: error.code };
         }
-     } else if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[DB_ERROR] Prisma Initialization Error during payment creation:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-         }
-        return {
-            success: false,
-            message: 'Database Connection Error. Failed to record payment.',
-            error: 'Initialization Error'
-        };
      } else if (error instanceof Error && error.message.includes("not found during transaction")) {
          // Custom error from transaction check
          return { success: false, message: error.message, error: "Transaction Error" };

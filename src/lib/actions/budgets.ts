@@ -15,8 +15,32 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get Budgets ---
 export async function getBudgets(filters?: { year?: number }): Promise<BudgetSchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const whereClause: Prisma.BudgetWhereInput = {};
     if (filters?.year) {
@@ -40,22 +64,21 @@ export async function getBudgets(filters?: { year?: number }): Promise<BudgetSch
      }));
     // return budgets as BudgetSchema[]; // Cast if validation is complex
   } catch (error) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching budgets:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
-         } else {
-              console.error("Database connection failed. Returning empty list.");
-         }
-        return [];
+    if (checkPrismaInitError(error, 'getBudgets')) {
+        console.warn("Returning empty budgets list due to database connection failure.");
+    } else {
+        console.error("[ACTION_ERROR] Error fetching budgets:", error);
     }
-    console.error("[ACTION_ERROR] Error fetching budgets:", error);
     return [];
   }
 }
 
 // --- Add Budget ---
 export async function addBudget(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
   const validatedFields = budgetFormSchema.safeParse({
@@ -79,6 +102,9 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
     revalidatePath('/reports'); // Budgets affect reports
     return { success: true, message: `Budget for period ${newBudget.period} added successfully.`, data: newBudget };
   } catch (error: unknown) {
+     if (checkPrismaInitError(error, 'addBudget')) {
+         return { success: false, message: 'Database Connection Error. Failed to add budget.', error: 'Initialization Error' };
+     }
      console.error("[DB_ERROR] Failed to add budget:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
        // Unique constraint violation (accountId + period)
@@ -99,17 +125,7 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
                 fieldErrors: { accountId: ['Invalid account selected.'] }
             };
        }
-     } else if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[DB_ERROR] Prisma Initialization Error during budget creation:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-         }
-        return {
-            success: false,
-            message: 'Database Connection Error. Failed to add budget.',
-            error: 'Initialization Error'
-        };
-    }
+     }
     return {
         success: false,
         message: 'Database Error: Failed to add budget.',

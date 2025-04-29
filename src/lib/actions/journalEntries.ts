@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
 import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema } from '@/lib/schemas/journalEntry';
 import { Prisma } from '@prisma/client';
+import { accountSchema } from '@/lib/schemas/account'; // Import for parsing relations
 
 // Type definition for action results
 type ActionResult = {
@@ -15,8 +16,32 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get Journal Entries ---
 export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const entries = await prisma.journalEntry.findMany({
         orderBy: { entryDate: 'desc' },
@@ -31,31 +56,32 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
      return entries.map(entry => journalEntrySchema.parse({
         ...entry,
         entryDate: new Date(entry.entryDate),
+        reference: entry.reference ?? undefined, // Handle null from DB
         lines: entry.lines.map(line => journalEntryLineSchema.parse({
             ...line,
             amount: line.amount.toNumber(), // Convert Decimal
+            description: line.description ?? undefined, // Handle null
             account: line.account // Already selected fields
         }))
         // createdBy: entry.createdBy ? userSchema.parse(entry.createdBy) : undefined, // Parse user if included
     }));
     // return entries as JournalEntrySchema[]; // Cast if validation is complex
   } catch (error) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching journal entries:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
-         } else {
-              console.error("Database connection failed. Returning empty list.");
-         }
-        return [];
-    }
-    console.error("[ACTION_ERROR] Error fetching journal entries:", error);
+     if (checkPrismaInitError(error, 'getJournalEntries')) {
+          console.warn("Returning empty journal entries list due to database connection failure.");
+     } else {
+        console.error("[ACTION_ERROR] Error fetching journal entries:", error);
+     }
     return [];
   }
 }
 
 // --- Add Journal Entry ---
 export async function addJournalEntry(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = {
       entryDate: formData.get('entryDate'),
       description: formData.get('description'),
@@ -95,7 +121,7 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
 
    for (let i = 0; i < parsedLines.length; i++) {
        const line = parsedLines[i];
-       const lineValidation = journalEntryLineSchema.omit({ id: true, journalEntryId: true, createdAt: true }).safeParse({
+       const lineValidation = journalEntryLineSchema.omit({ id: true, journalEntryId: true, createdAt: true, account: true }).safeParse({ // Exclude related objects
            accountId: line.accountId,
            type: line.type,
            amount: parseFloat(line.amount),
@@ -186,22 +212,16 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
     return { success: true, message: 'Journal entry created successfully.', data: result };
 
   } catch (error: unknown) {
+    if (checkPrismaInitError(error, 'addJournalEntry Transaction')) {
+        return { success: false, message: 'Database Connection Error. Failed to create journal entry.', error: 'Initialization Error' };
+    }
+
     console.error("[DB_ERROR] Failed to create journal entry transaction:", error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
          // Handle specific errors like invalid foreign keys (accountId)
          if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('accountId')) {
              return { success: false, message: 'Database Error: One or more accounts selected do not exist.', error: error.code };
          }
-     } else if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[DB_ERROR] Prisma Initialization Error during journal entry creation:", error.message);
-         if (error.message.includes('libssl')) {
-              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-         }
-        return {
-            success: false,
-            message: 'Database Connection Error. Failed to create journal entry.',
-            error: 'Initialization Error'
-        };
      } else if (error instanceof Error && error.message.includes("not found during balance update")) {
          return { success: false, message: error.message, error: "Transaction Error" };
      }

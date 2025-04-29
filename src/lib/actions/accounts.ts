@@ -10,8 +10,32 @@ import { Prisma } from '@prisma/client'; // Import Prisma namespace
 // Type definition for the result of actions
 type ActionResult = { success: boolean; message: string; error?: unknown; fieldErrors?: Record<string, string[]> };
 
+// Centralized flag to track if a critical init error occurred
+let prismaInitializationFailed = false;
+let libsslErrorLogged = false; // Flag to log libssl error only once per request cycle
+
+// Helper function to check and log Prisma init errors
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         prismaInitializationFailed = true; // Set the flag
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         } else if (!error.message.includes('libssl')) {
+             console.error(`DATABASE CONNECTION FAILED (${context}): Prisma failed to initialize. Check database connection details and server logs.`);
+         }
+         return true; // Indicate an init error occurred
+     }
+     return false; // Not an init error
+}
+
 // --- Get All Accounts ---
 export async function getAccounts(): Promise<AccountSchema[]> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   try {
     const accounts = await prisma.account.findMany({
       orderBy: { code: 'asc' },
@@ -23,26 +47,22 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         balance: account.balance?.toNumber(), // Convert Decimal to number
     }));
   } catch (error: unknown) {
-    if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error("[ACTION_ERROR] Prisma Initialization Error fetching accounts:", error.message);
-        if (error.message.includes('libssl')) {
-          console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL is installed and accessible in your deployment environment. Returning empty list.");
-        } else {
-             console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs. Returning empty list.");
-        }
-        // Return empty array to prevent breaking the page, but signal the error
-        return []; // Return empty array instead of throwing
+    if (checkPrismaInitError(error, 'getAccounts')) {
+        console.warn("Returning empty accounts list due to database connection failure.");
     } else {
-        // Log other types of errors
         console.error("[ACTION_ERROR] Error fetching accounts:", error);
-        // Return empty array for non-init errors to avoid breaking UI completely
-        return [];
     }
+    // Return empty array for any error to avoid breaking UI completely
+    return [];
   }
 }
 
 // --- Add New Account ---
 export async function addAccount(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
   const validatedFields = accountFormSchema.safeParse({ // Use form schema (omits id, balance, etc.)
@@ -84,6 +104,10 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Account "${name}" (Code: ${code}) created successfully.` };
 
   } catch (error: unknown) {
+    if (checkPrismaInitError(error, 'addAccount')) {
+         return { success: false, message: 'Database Connection Error: Could not connect to the database to add account.', error: 'Initialization Error' };
+     }
+
     console.error("[DB_ERROR] Failed to create account:", error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === 'P2002') {
@@ -96,13 +120,7 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
         }
          return { success: false, message: `Database Error: A unique constraint failed on ${target}.`, error: error.code };
       }
-    } else if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error("[DB_ERROR] Prisma Initialization Error during account creation:", error.message);
-          if (error.message.includes('libssl')) {
-               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-           }
-         return { success: false, message: 'Database Connection Error: Could not connect to the database.', error: 'Initialization Error' };
-     }
+    }
     return { success: false, message: 'Database Error: Failed to create account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -114,6 +132,10 @@ const updateAccountFormSchema = accountFormSchema.extend({
 });
 
 export async function updateAccount(formData: FormData): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   const rawData = Object.fromEntries(formData.entries());
 
    const validatedFields = updateAccountFormSchema.safeParse({
@@ -145,6 +167,10 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
     revalidatePath('/reports');
     return { success: true, message: `Account "${updateData.name}" (Code: ${updateData.code}) updated successfully.` };
   } catch (error: unknown) {
+     if (checkPrismaInitError(error, 'updateAccount')) {
+         return { success: false, message: 'Database Connection Error during account update.', error: 'Initialization Error' };
+     }
+
      console.error("[DB_ERROR] Failed to update account:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2025') return { success: false, message: 'Database Error: Account not found.', error: error.code };
@@ -158,19 +184,17 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
             }
            return { success: false, message: `Database Error: A unique constraint failed on ${target}.`, error: error.code };
         }
-      } else if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error("[DB_ERROR] Prisma Initialization Error during account update:", error.message);
-          if (error.message.includes('libssl')) {
-               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-           }
-         return { success: false, message: 'Database Initialization Error.', error: 'Initialization Error' };
-     }
+      }
      return { success: false, message: 'Database Error: Failed to update account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 // --- Delete Account ---
 export async function deleteAccount(id: string): Promise<ActionResult> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   if (!id || typeof id !== 'string' || id.length < 5) {
      return { success: false, message: 'Invalid Account ID provided.' };
   }
@@ -201,6 +225,10 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
     return { success: true, message: 'Account deleted successfully.' };
 
   } catch (error: unknown) {
+     if (checkPrismaInitError(error, 'deleteAccount')) {
+         return { success: false, message: 'Database Connection Error during account deletion.', error: 'Initialization Error' };
+     }
+
      console.error("[DB_ERROR] Failed to delete account:", error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2025') return { success: false, message: 'Account not found.', error: error.code };
@@ -208,19 +236,17 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
         if (error.code === 'P2003') {
            return { success: false, message: 'Cannot delete account: It is linked to existing Expenses or Journal Entries.', error: error.code };
         }
-      } else if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error("[DB_ERROR] Prisma Initialization Error during account deletion:", error.message);
-          if (error.message.includes('libssl')) {
-               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-           }
-         return { success: false, message: 'Database Initialization Error.', error: 'Initialization Error' };
-     }
+      }
      return { success: false, message: 'Database Error: Failed to delete account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-// --- Get Account by ID (Remains similar, adjusted parsing) ---
+// --- Get Account by ID ---
 export async function getAccountById(id: string): Promise<AccountSchema | null> {
+  // Reset flags for this request
+  prismaInitializationFailed = false;
+  libsslErrorLogged = false;
+
   if (!id) return null;
   try {
     const account = await prisma.account.findUnique({ where: { id } });
@@ -231,13 +257,8 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
         balance: account.balance?.toNumber(),
     });
   } catch (error: unknown) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error(`[ACTION_ERROR] Prisma Initialization Error fetching account ${id}:`, error.message);
-          if (error.message.includes('libssl')) {
-               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
-           }
-        console.error("Database connection failed.");
-        return null;
+     if (checkPrismaInitError(error, `getAccountById (${id})`)) {
+        console.warn(`Returning null for getAccountById(${id}) due to database connection failure.`);
      } else {
         console.error(`[ACTION_ERROR] Error fetching account ${id}:`, error);
      }
