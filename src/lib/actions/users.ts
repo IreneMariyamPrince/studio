@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { userSchema, userFormSchema, UserSchema, userRoles } from '@/lib/schemas/user';
 import { Prisma } from '@prisma/client';
+import { userSchema, userFormSchema, UserSchema, userRoles } from '@/lib/schemas/user';
 import { getTenantId, getUserId, isSuperAdmin } from '@/lib/utils/tenant'; // Tenant/user context helpers
 
 // Type definition for action results
@@ -16,13 +16,22 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 
@@ -55,7 +64,7 @@ export async function getUsers(): Promise<ActionResult> {
     return { success: true, message: 'Users fetched successfully.', data: users.map(u => userSchema.parse(u)) };
   } catch (error) {
     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        return { success: false, message: 'Database Connection Error. Failed to fetch users.', error: 'Initialization Error' };
     }
     console.error(`[ACTION_ERROR] ${context}:`, error);
     return { success: false, message: 'Failed to fetch users.', error };
@@ -88,6 +97,10 @@ export async function addUser(formData: FormData): Promise<ActionResult> {
              const tenantExists = await prisma.tenant.findUnique({ where: { id: targetTenantId } });
              if (!tenantExists) return { success: false, message: `Target tenant (${targetTenantId}) not found.` };
         } catch (error) {
+             if (checkPrismaInitError(error, `addUser - Tenant Validation`)) {
+                 return { success: false, message: 'Database Connection Error during tenant validation.' };
+             }
+             console.error(`[DB_ERROR] Error validating target tenant:`, error);
              return { success: false, message: 'Error validating target tenant.' };
         }
     }
@@ -128,7 +141,7 @@ export async function addUser(formData: FormData): Promise<ActionResult> {
 
     } catch (error) {
         if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+            return { success: false, message: 'Database Connection Error. Failed to add user.', error: 'Initialization Error' };
         }
         console.error(`[DB_ERROR] ${context}:`, error);
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -151,17 +164,22 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
     if (!currentUserIsSuper && !currentTenantId) {
        return { success: false, message: 'Unauthorized: Context required.' };
     }
+    const context = `updateUser (ID: ${targetUserId}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
 
     // Fetch user to check ownership/permissions
     let targetUser;
     try {
-         targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { tenantId: true, isSuperAdmin: true } });
+         targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { tenantId: true, isSuperAdmin: true, role: true } }); // Added role fetch
          if (!targetUser) return { success: false, message: 'User not found.' };
          // Tenant Admin can only update users in their tenant, and cannot modify super admins
          if (!currentUserIsSuper && (targetUser.tenantId !== currentTenantId || targetUser.isSuperAdmin)) {
               return { success: false, message: 'Unauthorized to update this user.' };
          }
     } catch (error) {
+         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
+             return { success: false, message: 'Database Connection Error during user verification.' };
+         }
+         console.error(`[DB_ERROR] Error verifying user in ${context}:`, error);
          return { success: false, message: 'Database error verifying user.' };
     }
 
@@ -178,6 +196,7 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
 
      if (!validatedFields.success) {
         const fieldErrors = validatedFields.error.flatten().fieldErrors;
+         console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
         return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
     }
 
@@ -185,6 +204,7 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
      if (!currentUserIsSuper) {
           if (validatedFields.data.role === 'Admin' && targetUser.role !== 'Admin') {
                 // Prevent promotion to Admin by Tenant Admin (example logic)
+                 console.warn(`[AUTH_WARN] ${context}: Tenant admin attempting to promote user to Admin.`);
                 return { success: false, message: 'Unauthorized to promote user to Admin role.' };
           }
           // Disallow changing email if needed
@@ -192,7 +212,6 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
      }
 
     const { id, ...updateData } = validatedFields.data;
-    const context = `updateUser (ID: ${id}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
 
     try {
         const updatedUser = await prisma.user.update({
@@ -204,7 +223,7 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
         return { success: true, message: 'User updated successfully.', data: userSchema.parse(updatedUser) };
     } catch (error) {
          if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+            return { success: false, message: 'Database Connection Error. Failed to update user.', error: 'Initialization Error' };
         }
         console.error(`[DB_ERROR] ${context}:`, error);
         if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -232,6 +251,7 @@ export async function deleteUser(id: string): Promise<ActionResult> {
      if (id === currentUserId) {
         return { success: false, message: 'Cannot delete yourself.' }; // Prevent self-deletion
     }
+     const context = `deleteUser (ID: ${id}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
 
     // Fetch user to check ownership/permissions
     let targetUser;
@@ -244,13 +264,17 @@ export async function deleteUser(id: string): Promise<ActionResult> {
          }
           // Prevent deleting super admins entirely? Or only allow other super admins?
          if (targetUser.isSuperAdmin && !currentUserIsSuper) { // Strict: Only super admins can delete super admins
+              console.warn(`[AUTH_WARN] ${context}: Tenant admin attempting to delete Super Admin.`);
              return { success: false, message: 'Unauthorized to delete a Super Admin user.' };
          }
     } catch (error) {
+         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
+             return { success: false, message: 'Database Connection Error during user verification.' };
+         }
+         console.error(`[DB_ERROR] Error verifying user for deletion in ${context}:`, error);
          return { success: false, message: 'Database error verifying user for deletion.' };
     }
 
-    const context = `deleteUser (ID: ${id}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
     try {
         // Consider what happens to records created by this user (e.g., Journal Entries)
         // The schema uses onDelete: SetNull for createdById, so the records will remain.
@@ -260,7 +284,7 @@ export async function deleteUser(id: string): Promise<ActionResult> {
         return { success: true, message: 'User deleted successfully.' };
     } catch (error) {
         if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+            return { success: false, message: 'Database Connection Error. Failed to delete user.', error: 'Initialization Error' };
         }
         console.error(`[DB_ERROR] ${context}:`, error);
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {

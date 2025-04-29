@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { budgetSchema, budgetFormSchema, BudgetSchema } from '@/lib/schemas/budget';
 import { Prisma } from '@prisma/client';
+import { budgetSchema, budgetFormSchema, BudgetSchema } from '@/lib/schemas/budget';
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
@@ -16,14 +16,22 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Handle libssl error message specifically if needed
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 // --- Get Budgets for the current tenant ---
@@ -33,6 +41,7 @@ export async function getBudgets(filters?: { year?: number }): Promise<BudgetSch
       console.error("[ACTION_ERROR] Tenant ID not found in getBudgets.");
       return [];
   }
+  const context = `getBudgets (Tenant: ${tenantId})`;
 
   try {
     const whereClause: Prisma.BudgetWhereInput = { tenantId: tenantId }; // Base filter for tenant
@@ -56,10 +65,11 @@ export async function getBudgets(filters?: { year?: number }): Promise<BudgetSch
         account: budget.account // Include selected account fields
      }));
   } catch (error) {
-    if (checkPrismaInitError(error, `getBudgets (Tenant: ${tenantId})`)) {
-        console.warn(`Returning empty budgets list for tenant ${tenantId} due to DB connection issue.`);
+    if (checkPrismaInitError(error, context)) {
+        console.warn(`[DB_WARN] Database connection failed while fetching budgets for tenant ${tenantId}. Returning empty list.`);
     } else {
         console.error(`[ACTION_ERROR] Error fetching budgets for tenant ${tenantId}:`, error);
+        console.warn(`[DB_WARN] Returning empty budgets list for tenant ${tenantId} due to unexpected error.`);
     }
     return [];
   }
@@ -71,6 +81,7 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
    if (!tenantId) {
        return { success: false, message: 'Tenant ID not found. Cannot add budget.' };
    }
+   const context = `addBudget (Tenant: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -82,7 +93,7 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error(`[VALIDATION_ERROR] addBudget (Tenant: ${tenantId}):`, fieldErrors);
+    console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
@@ -93,6 +104,9 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
           return { success: false, message: 'Invalid account selected.', fieldErrors: { accountId: ['Invalid account selected.'] } };
       }
   } catch (error) {
+      if(checkPrismaInitError(error, `${context} - Account Validation`)) {
+           return { success: false, message: 'Database Connection Error during account validation.' };
+      }
       console.error(`[DB_ERROR] Error validating account for tenant ${tenantId} during budget creation:`, error);
       return { success: false, message: 'Database error during validation.' };
   }
@@ -110,10 +124,10 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
     revalidatePath('/reports'); // Budgets affect reports
     return { success: true, message: `Budget for period ${newBudget.period} added successfully.`, data: newBudget };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, `addBudget (Tenant: ${tenantId})`)) {
+     if (checkPrismaInitError(error, context)) {
          return { success: false, message: 'Database Connection Error. Failed to add budget.', error: 'Initialization Error' };
      }
-     console.error(`[DB_ERROR] Failed to add budget for tenant ${tenantId}:`, error);
+     console.error(`[DB_ERROR] ${context}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
        // Unique constraint violation (tenantId + accountId + period)
        if (error.code === 'P2002') {
@@ -143,6 +157,7 @@ export async function updateBudget(formData: FormData): Promise<ActionResult> {
     if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
     const budgetId = formData.get('id') as string;
     if (!budgetId) return { success: false, message: "Budget ID missing." };
+    const context = `updateBudget (ID: ${budgetId}, Tenant: ${tenantId})`;
 
     // 1. Verify budget belongs to the tenant
     try {
@@ -150,6 +165,10 @@ export async function updateBudget(formData: FormData): Promise<ActionResult> {
         if (!budget) return { success: false, message: 'Budget not found.' };
         if (budget.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
     } catch (error) {
+         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
+             return { success: false, message: 'Database Connection Error during ownership check.' };
+         }
+        console.error(`[DB_ERROR] Error verifying budget ownership in ${context}:`, error);
         return { success: false, message: 'Database error verifying budget ownership.' };
     }
 
@@ -166,6 +185,10 @@ export async function updateBudget(formData: FormData): Promise<ActionResult> {
         revalidatePath('/reports');
         return { success: true, message: 'Budget updated successfully.' };
     } catch (error) {
+         if (checkPrismaInitError(error, context)) {
+             return { success: false, message: 'Database Connection Error. Failed to update budget.', error: 'Initialization Error' };
+         }
+         console.error(`[DB_ERROR] ${context}:`, error);
         // Handle DB errors (connection, unique constraint if period/account changes)
         return { success: false, message: 'Database Error: Failed to update budget.' /* + specific error handling */ };
     }
@@ -176,6 +199,7 @@ export async function deleteBudget(id: string): Promise<ActionResult> {
     const tenantId = await getTenantId();
     if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
     if (!id) return { success: false, message: "Budget ID missing." };
+    const context = `deleteBudget (ID: ${id}, Tenant: ${tenantId})`;
 
     try {
          // 1. Verify budget belongs to the tenant
@@ -190,10 +214,10 @@ export async function deleteBudget(id: string): Promise<ActionResult> {
         revalidatePath('/reports');
         return { success: true, message: 'Budget deleted successfully.' };
     } catch (error) {
-        if (checkPrismaInitError(error, `deleteBudget (${id}, Tenant: ${tenantId})`)) {
-           return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        if (checkPrismaInitError(error, context)) {
+           return { success: false, message: 'Database Connection Error. Failed to delete budget.', error: 'Initialization Error' };
         }
-        console.error(`[DB_ERROR] Failed to delete budget ${id} for tenant ${tenantId}:`, error);
+        console.error(`[DB_ERROR] ${context}:`, error);
          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
              return { success: false, message: 'Budget not found.', error: error.code };
          }

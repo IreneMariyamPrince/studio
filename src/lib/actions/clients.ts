@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { clientSchema, clientFormSchema, ClientSchema } from '@/lib/schemas/client';
 import { Prisma } from '@prisma/client';
+import { clientSchema, clientFormSchema, ClientSchema } from '@/lib/schemas/client';
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
@@ -16,6 +16,24 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
+     }
+     return false; // Not an initialization error
+}
+
 // --- Get Clients for the current tenant ---
 export async function getClients(): Promise<ClientSchema[]> {
   const tenantId = await getTenantId();
@@ -23,6 +41,7 @@ export async function getClients(): Promise<ClientSchema[]> {
     console.error("[ACTION_ERROR] Tenant ID not found in getClients.");
     return [];
   }
+  const context = `getClients (Tenant: ${tenantId})`;
 
   try {
     const clients = await prisma.client.findMany({
@@ -39,14 +58,13 @@ export async function getClients(): Promise<ClientSchema[]> {
         balanceDue: client.balanceDue?.toNumber() ?? 0, // Handle Decimal
     }));
   } catch (error) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in getClients (Tenant: ${tenantId}):`, error.message);
-         throw new Error("Database connection failed.");
+     if (checkPrismaInitError(error, context)) {
+         console.warn(`[DB_WARN] Database connection failed while fetching clients for tenant ${tenantId}. Returning empty list.`);
      } else {
         console.error(`[ACTION_ERROR] Error fetching clients for tenant ${tenantId}:`, error);
-        throw new Error("Failed to fetch clients.");
+        console.warn(`[DB_WARN] Returning empty clients list for tenant ${tenantId} due to unexpected error.`);
      }
-    // return []; // Fallback
+    return []; // Fallback
   }
 }
 
@@ -56,6 +74,7 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
    if (!tenantId) {
        return { success: false, message: 'Tenant ID not found. Cannot add client.' };
    }
+   const context = `addClient (Tenant: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -69,7 +88,7 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error(`[VALIDATION_ERROR] addClient (Tenant: ${tenantId}):`, fieldErrors);
+    console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
@@ -85,12 +104,11 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
     revalidatePath('/invoices/new'); // Revalidate new invoice page if client dropdown is there
     return { success: true, message: `Client "${newClient.name}" added successfully.`, data: newClient };
   } catch (error: unknown) {
-    if (error instanceof Prisma.PrismaClientInitializationError) {
-        console.error(`[ACTION_ERROR] Prisma Initialization Error in addClient (Tenant: ${tenantId}):`, error.message);
+    if (checkPrismaInitError(error, context)) {
         return { success: false, message: 'Database Connection Error. Failed to add client.', error: 'Initialization Error' };
     }
 
-    console.error(`[DB_ERROR] Failed to add client for tenant ${tenantId}:`, error);
+    console.error(`[DB_ERROR] ${context}:`, error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       // Check unique constraint for email within the tenant
       if (error.code === 'P2002' && (error.meta?.target as string[])?.includes('email') && (error.meta?.target as string[])?.includes('tenantId') ) {
@@ -118,6 +136,7 @@ export async function updateClient(formData: FormData): Promise<ActionResult> {
    }
    const clientId = formData.get('id') as string;
    if (!clientId) return { success: false, message: "Client ID missing." };
+   const context = `updateClient (ID: ${clientId}, Tenant: ${tenantId})`;
 
    const rawData = Object.fromEntries(formData.entries());
    const validatedFields = clientFormSchema.safeParse({ /* ... parse rawData ... */ });
@@ -140,6 +159,10 @@ export async function updateClient(formData: FormData): Promise<ActionResult> {
         revalidatePath(`/clients/${clientId}`); // Revalidate specific client page if exists
         return { success: true, message: 'Client updated successfully.' };
     } catch (error) {
+        if (checkPrismaInitError(error, context)) {
+             return { success: false, message: 'Database Connection Error. Failed to update client.', error: 'Initialization Error' };
+        }
+        console.error(`[DB_ERROR] ${context}:`, error);
         // Handle DB errors (connection, unique constraints like email)
         return { success: false, message: 'Database Error: Failed to update client.' /* Add specific error handling */ };
     }
@@ -152,11 +175,12 @@ export async function deleteClient(id: string): Promise<ActionResult> {
        return { success: false, message: 'Tenant ID not found. Cannot delete client.' };
    }
    if (!id) return { success: false, message: "Client ID missing." };
+   const context = `deleteClient (ID: ${id}, Tenant: ${tenantId})`;
 
    try {
         // 1. Verify client belongs to the current tenant
         const client = await prisma.client.findUnique({ where: { id }, select: { tenantId: true } });
-        if (!client) return { success: false, message: 'Client not found.' };
+        if (!client) return { success: false, message: 'Client not found.', error: 'P2025' };
         if (client.tenantId !== tenantId) return { success: false, message: 'Authorization failed.' };
 
         // 2. Check for related invoices (onDelete: Restrict will prevent deletion if invoices exist)
@@ -168,6 +192,10 @@ export async function deleteClient(id: string): Promise<ActionResult> {
         revalidatePath('/clients');
         return { success: true, message: 'Client deleted successfully.' };
    } catch (error) {
+        if (checkPrismaInitError(error, context)) {
+           return { success: false, message: 'Database Connection Error. Failed to delete client.', error: 'Initialization Error' };
+        }
+        console.error(`[DB_ERROR] ${context}:`, error);
        if (error instanceof Prisma.PrismaClientKnownRequestError) {
            if (error.code === 'P2003') { // Foreign key constraint violation
                return { success: false, message: 'Cannot delete client: Client has associated invoices.', error: error.code };

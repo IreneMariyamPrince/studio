@@ -6,14 +6,22 @@ import { Prisma } from '@prisma/client';
 import { startOfYear, endOfYear, startOfMonth, endOfMonth } from 'date-fns';
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Handle libssl error message specifically if needed
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 // Helper to safely execute Prisma calls and handle init errors specifically
@@ -27,9 +35,10 @@ async function safePrismaCall<T>(prismaPromise: Promise<T>, fallback: T, tenantI
         return await prismaPromise;
     } catch (error) {
         if (checkPrismaInitError(error, `${context} (Tenant: ${tenantId})`)) {
-            console.warn(`Returning fallback data for ${context} for tenant ${tenantId} due to DB connection issue.`);
+            console.warn(`[DB_WARN] Database connection failed during ${context} for tenant ${tenantId}. Returning fallback data.`);
         } else {
             console.error(`[REPORT_ERROR] Error executing Prisma call in ${context} for tenant ${tenantId}:`, error);
+             console.warn(`[DB_WARN] Returning fallback data for ${context} for tenant ${tenantId} due to unexpected error.`);
         }
         return fallback; // Return fallback data on any error
     }
@@ -72,10 +81,10 @@ export async function getProfitLossData(startDate: Date, endDate: Date): Promise
                 }
             },
             _sum: {
-                amount: true,
+                amount: true, // Sum all amounts for the period
             },
-            // We need to know the account type to correctly calculate the net change
-            // Grouping by type directly isn't simple with sums, so fetch accounts separately or adjust logic
+            // We also need debits and credits separately for accurate P&L calculation
+            // This requires a more complex query or fetching raw lines
         }),
         [], tenantId, aggregationContext
     );
@@ -97,25 +106,51 @@ export async function getProfitLossData(startDate: Date, endDate: Date): Promise
     const revenueBreakdown: ProfitLossData['revenue'] = [];
     const expenseBreakdown: ProfitLossData['expenses'] = [];
 
-    for (const agg of accountAggregations) {
-        const account = accountMap.get(agg.accountId);
-        if (!account) continue; // Should not happen if data is consistent
+    // Fetch raw lines for accurate calculation (more robust than relying on net sum)
+    const linesData = await safePrismaCall(
+        prisma.journalEntryLine.findMany({
+            where: {
+                 journalEntry: {
+                    tenantId: tenantId,
+                    entryDate: { gte: startDate, lte: endDate },
+                 },
+                 accountId: { in: accountIds } // Filter by relevant P&L account IDs
+            },
+            select: { accountId: true, type: true, amount: true }
+        }),
+        [], tenantId, `getProfitLossData Lines Fetch`
+    );
 
-        const sum = agg._sum.amount?.toNumber() ?? 0;
+    const accountTotals = new Map<string, { debits: number, credits: number }>();
+
+    linesData.forEach(line => {
+        const current = accountTotals.get(line.accountId) ?? { debits: 0, credits: 0 };
+        const amount = line.amount.toNumber();
+        if (line.type === 'Debit') {
+            current.debits += amount;
+        } else {
+            current.credits += amount;
+        }
+        accountTotals.set(line.accountId, current);
+    });
+
+
+    for (const account of accounts) {
+        const totals = accountTotals.get(account.id);
+        if (!totals) continue;
+
         let netChange = 0;
-
-        // Determine net change based on account type and typical balance
-        // Credits increase Revenue, Debits increase Expenses
-        // This simplified logic assumes sums reflect net activity correctly.
-        // A more robust approach sums debits and credits separately per account.
+        // Revenue increases with Credits, decreases with Debits
         if (account.type === 'Revenue') {
-            netChange = sum; // Simplified: Assume sum reflects net credit balance for revenue
+            netChange = totals.credits - totals.debits;
             totalRevenue += netChange;
-             revenueBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
-        } else if (account.type === 'Expense') {
-            netChange = sum; // Simplified: Assume sum reflects net debit balance for expense
+            revenueBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
+        }
+        // Expenses increase with Debits, decrease with Credits
+        else if (account.type === 'Expense') {
+            netChange = totals.debits - totals.credits;
             totalExpenses += netChange;
-             expenseBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
+            expenseBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
         }
     }
 
@@ -123,7 +158,7 @@ export async function getProfitLossData(startDate: Date, endDate: Date): Promise
     return {
         revenue: revenueBreakdown,
         expenses: expenseBreakdown,
-        netProfit: totalRevenue - totalExpenses, // Revenue typically credits, Expenses debits
+        netProfit: totalRevenue - totalExpenses,
         startDate,
         endDate,
     };

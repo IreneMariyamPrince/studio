@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { paymentSchema, paymentFormSchema, PaymentSchema } from '@/lib/schemas/payment';
 import { Prisma } from '@prisma/client';
+import { paymentSchema, paymentFormSchema, PaymentSchema } from '@/lib/schemas/payment';
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
 // Type definition for action results
@@ -16,14 +16,22 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Handle libssl error message specifically if needed
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 // --- Get Payments for the current tenant ---
@@ -33,6 +41,7 @@ export async function getPayments(): Promise<PaymentSchema[]> {
       console.error("[ACTION_ERROR] Tenant ID not found in getPayments.");
       return [];
   }
+  const context = `getPayments (Tenant: ${tenantId})`;
 
   try {
     const payments = await prisma.payment.findMany({
@@ -55,10 +64,11 @@ export async function getPayments(): Promise<PaymentSchema[]> {
         expense: p.expense ? { ...p.expense, amount: p.expense.amount.toNumber() } : null,
     }));
   } catch (error) {
-    if (checkPrismaInitError(error, `getPayments (Tenant: ${tenantId})`)) {
-        console.warn(`Returning empty payments list for tenant ${tenantId} due to DB connection issue.`);
+    if (checkPrismaInitError(error, context)) {
+        console.warn(`[DB_WARN] Database connection failed while fetching payments for tenant ${tenantId}. Returning empty list.`);
     } else {
         console.error(`[ACTION_ERROR] Error fetching payments for tenant ${tenantId}:`, error);
+        console.warn(`[DB_WARN] Returning empty payments list for tenant ${tenantId} due to unexpected error.`);
     }
     return [];
   }
@@ -70,6 +80,7 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
    if (!tenantId) {
        return { success: false, message: 'Tenant ID not found. Cannot record payment.' };
    }
+   const context = `addPayment (Tenant: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -86,7 +97,7 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error(`[VALIDATION_ERROR] addPayment (Tenant: ${tenantId}):`, fieldErrors);
+    console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
@@ -118,6 +129,9 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
             // return { success: false, message: 'Payment must be linked to an invoice or an expense.' };
          }
    } catch (error) {
+        if(checkPrismaInitError(error, `${context} - Relation Validation`)) {
+           return { success: false, message: 'Database Connection Error during validation.' };
+        }
        console.error(`[DB_ERROR] Error validating relations for tenant ${tenantId} during payment creation:`, error);
        return { success: false, message: 'Database error during validation.' };
    }
@@ -192,11 +206,11 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
     return { success: true, message: 'Payment recorded successfully.', data: result };
 
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, `addPayment Transaction (Tenant: ${tenantId})`)) {
+     if (checkPrismaInitError(error, `${context} Transaction`)) {
         return { success: false, message: 'Database Connection Error. Failed to record payment.', error: 'Initialization Error' };
      }
 
-     console.error(`[DB_ERROR] Failed to record payment transaction for tenant ${tenantId}:`, error);
+     console.error(`[DB_ERROR] ${context} Transaction:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2003') {
             const field = (error.meta?.field_name as string) || 'related record';
@@ -222,6 +236,7 @@ export async function updatePayment(formData: FormData): Promise<ActionResult> {
     if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
     const paymentId = formData.get('id') as string;
     if (!paymentId) return { success: false, message: "Payment ID missing." };
+    const context = `updatePayment (ID: ${paymentId}, Tenant: ${tenantId})`;
 
     // 1. Verify payment belongs to the tenant
     try {
@@ -229,7 +244,10 @@ export async function updatePayment(formData: FormData): Promise<ActionResult> {
         if (!payment) return { success: false, message: 'Payment not found.' };
         if (payment.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
     } catch (error) {
-        // Handle DB error
+        if (checkPrismaInitError(error, `${context} - Ownership Check`)) {
+             return { success: false, message: 'Database Connection Error during ownership check.' };
+        }
+        console.error(`[DB_ERROR] Error verifying payment ownership in ${context}:`, error);
         return { success: false, message: 'Database error verifying payment ownership.' };
     }
 
@@ -249,6 +267,7 @@ export async function deletePayment(id: string): Promise<ActionResult> {
     const tenantId = await getTenantId();
     if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
     if (!id) return { success: false, message: "Payment ID missing." };
+    const context = `deletePayment (ID: ${id}, Tenant: ${tenantId})`;
 
     // --- Transaction Logic ---
     try {
@@ -325,10 +344,10 @@ export async function deletePayment(id: string): Promise<ActionResult> {
         return { success: true, message: 'Payment deleted successfully.' };
 
     } catch (error: unknown) {
-         if (checkPrismaInitError(error, `deletePayment Transaction (${id}, Tenant: ${tenantId})`)) {
+         if (checkPrismaInitError(error, `${context} Transaction`)) {
              return { success: false, message: 'Database Connection Error. Failed to delete payment.', error: 'Initialization Error' };
          }
-         console.error(`[DB_ERROR] Failed to delete payment ${id} for tenant ${tenantId}:`, error);
+         console.error(`[DB_ERROR] ${context} Transaction:`, error);
           if (error instanceof Error && (error.message === 'Payment not found.' || error.message.startsWith('Authorization Error'))) {
               return { success: false, message: error.message };
           }

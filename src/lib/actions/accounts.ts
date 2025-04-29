@@ -4,9 +4,9 @@
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
+import { Prisma } from '@prisma/client'; // Import Prisma namespace
 import { accountSchema, AccountSchema, accountFormSchema } from '@/lib/schemas/account'; // Import form schema
 import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library'; // Import specific error type
-import { Prisma } from '@prisma/client'; // Import Prisma namespace
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID (implement this)
 
 // Type definition for the result of actions
@@ -17,6 +17,24 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
+function checkPrismaInitError(error: unknown, context: string): boolean {
+     if (error instanceof Prisma.PrismaClientInitializationError) {
+         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
+     }
+     return false; // Not an initialization error
+}
+
 // --- Get All Accounts for the current tenant ---
 export async function getAccounts(): Promise<AccountSchema[]> {
   const tenantId = await getTenantId(); // Get tenant ID from session/context
@@ -24,6 +42,7 @@ export async function getAccounts(): Promise<AccountSchema[]> {
       console.error("[ACTION_ERROR] Tenant ID not found in getAccounts.");
       return []; // Or throw an error
   }
+  const context = `getAccounts (Tenant: ${tenantId})`;
 
   try {
     const accounts = await prisma.account.findMany({
@@ -37,21 +56,15 @@ export async function getAccounts(): Promise<AccountSchema[]> {
         balance: account.balance?.toNumber(), // Convert Decimal to number
     }));
   } catch (error: unknown) {
-    if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in getAccounts (Tenant: ${tenantId}):`, error.message);
-         // Handle libssl error specifically if needed
-         if (error.message.includes('libssl')) {
-            console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library.");
-         }
-         // Throw a user-friendly error or return empty array based on desired behavior
-         throw new Error("Database connection failed. Please check server logs.");
+     if (checkPrismaInitError(error, context)) {
+         console.warn(`[DB_WARN] Database connection failed while fetching accounts for tenant ${tenantId}. Returning empty list.`);
      } else {
          // Log other types of errors
          console.error(`[ACTION_ERROR] Error fetching accounts for tenant ${tenantId}:`, error);
-         // Optionally throw a generic error
-         throw new Error("Failed to fetch accounts.");
+          console.warn(`[DB_WARN] Returning empty accounts list for tenant ${tenantId} due to unexpected error.`);
      }
-     // return []; // Fallback, consider throwing instead
+     // Return empty array to prevent breaking UI, but log the error
+     return [];
   }
 }
 
@@ -61,6 +74,7 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
   if (!tenantId) {
       return { success: false, message: 'Tenant ID not found. Cannot add account.' };
   }
+  const context = `addAccount (Tenant: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -74,7 +88,7 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error(`[VALIDATION_ERROR] addAccount (Tenant: ${tenantId}):`, fieldErrors);
+    console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
     return {
       success: false,
       message: 'Validation failed. Please check the form fields.',
@@ -104,13 +118,12 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Account "${name}" (Code: ${code}) created successfully.` };
 
   } catch (error: unknown) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in addAccount (Tenant: ${tenantId}):`, error.message);
+     if (checkPrismaInitError(error, context)) {
          return { success: false, message: 'Database Connection Error: Could not connect to the database to add account.', error: 'Initialization Error' };
      }
 
     // Handle other Prisma or unknown errors
-    console.error(`[DB_ERROR] Failed to create account for tenant ${tenantId}:`, error);
+    console.error(`[DB_ERROR] ${context}:`, error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       // Unique constraint violation (e.g., duplicate account code *within the tenant*)
       if (error.code === 'P2002') {
@@ -142,6 +155,8 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
    if (!tenantId) {
        return { success: false, message: 'Tenant ID not found. Cannot update account.' };
    }
+   const accountId = formData.get('id') as string;
+   const context = `updateAccount (ID: ${accountId}, Tenant: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
 
@@ -156,7 +171,7 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
 
   if (!validatedFields.success) {
      const fieldErrors = validatedFields.error.flatten().fieldErrors;
-     console.error(`[VALIDATION_ERROR] updateAccount (Tenant: ${tenantId}):`, fieldErrors);
+     console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
@@ -175,6 +190,7 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
     }
 
     if (account.tenantId !== tenantId) {
+        console.warn(`[AUTH_WARN] ${context}: Attempted update by user from wrong tenant.`);
         return { success: false, message: 'Authorization Error: You do not have permission to update this account.' };
     }
 
@@ -188,12 +204,11 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
     revalidatePath('/reports');
     return { success: true, message: `Account "${updateData.name}" (Code: ${updateData.code}) updated successfully.` };
   } catch (error: unknown) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in updateAccount (Tenant: ${tenantId}):`, error.message);
+     if (checkPrismaInitError(error, context)) {
          return { success: false, message: 'Database Connection Error during account update.', error: 'Initialization Error' };
      }
 
-     console.error(`[DB_ERROR] Failed to update account for tenant ${tenantId}:`, error);
+     console.error(`[DB_ERROR] ${context}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         // Handle specific known errors
         if (error.code === 'P2025') return { success: false, message: 'Database Error: Account not found.', error: error.code };
@@ -219,9 +234,11 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
    if (!tenantId) {
        return { success: false, message: 'Tenant ID not found. Cannot delete account.' };
    }
+   const context = `deleteAccount (ID: ${id}, Tenant: ${tenantId})`;
 
   // Basic ID validation
   if (!id || typeof id !== 'string' || id.length < 5) { // Basic CUID length check
+     console.error(`[VALIDATION_ERROR] ${context}: Invalid Account ID provided.`);
      return { success: false, message: 'Invalid Account ID provided.' };
   }
 
@@ -242,6 +259,7 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
 
     // Verify tenant ownership
     if (account.tenantId !== tenantId) {
+        console.warn(`[AUTH_WARN] ${context}: Attempted delete by user from wrong tenant.`);
         return { success: false, message: 'Authorization Error: You do not have permission to delete this account.' };
     }
 
@@ -263,12 +281,11 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
     return { success: true, message: 'Account deleted successfully.' };
 
   } catch (error: unknown) {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in deleteAccount (Tenant: ${tenantId}):`, error.message);
+     if (checkPrismaInitError(error, context)) {
          return { success: false, message: 'Database Connection Error during account deletion.', error: 'Initialization Error' };
      }
 
-     console.error(`[DB_ERROR] Failed to delete account ${id} for tenant ${tenantId}:`, error);
+     console.error(`[DB_ERROR] ${context}:`, error);
      // Handle Prisma errors that might occur despite checks (e.g., race conditions)
      if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (error.code === 'P2025') return { success: false, message: 'Account not found.', error: error.code };
@@ -288,6 +305,7 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
        console.error("[ACTION_ERROR] Tenant ID not found in getAccountById.");
        return null; // Or throw
    }
+   const context = `getAccountById (ID: ${id}, Tenant: ${tenantId})`;
 
   if (!id) return null;
   try {
@@ -306,10 +324,11 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
         balance: account.balance?.toNumber(),
     });
   } catch (error: unknown) {
-      if (error instanceof Prisma.PrismaClientInitializationError) {
-           console.error(`[ACTION_ERROR] Prisma Initialization Error in getAccountById(${id}, Tenant: ${tenantId}):`, error.message);
+      if (checkPrismaInitError(error, context)) {
+            console.warn(`[DB_WARN] Database connection failed while fetching account ${id} for tenant ${tenantId}. Returning null.`);
        } else {
            console.error(`[ACTION_ERROR] Error fetching account ${id} for tenant ${tenantId}:`, error);
+           console.warn(`[DB_WARN] Returning null for account ${id} (tenant ${tenantId}) due to unexpected error.`);
        }
     return null; // Return null on any error
   }

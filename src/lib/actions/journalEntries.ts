@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema } from '@/lib/schemas/journalEntry';
 import { Prisma } from '@prisma/client';
+import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema } from '@/lib/schemas/journalEntry';
 import { accountSchema } from '@/lib/schemas/account'; // Import for parsing relations
 import { getTenantId, getUserId } from '@/lib/utils/tenant'; // Helper to get tenant/user ID
 
@@ -17,14 +17,22 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Handle libssl error message specifically if needed
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 // --- Get Journal Entries for the current tenant ---
@@ -34,6 +42,7 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
        console.error("[ACTION_ERROR] Tenant ID not found in getJournalEntries.");
        return [];
    }
+   const context = `getJournalEntries (Tenant: ${tenantId})`;
 
   try {
     const entries = await prisma.journalEntry.findMany({
@@ -60,10 +69,11 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
         // createdBy: entry.createdBy ? userSchema.parse(entry.createdBy) : undefined, // Parse user if included
     }));
   } catch (error) {
-     if (checkPrismaInitError(error, `getJournalEntries (Tenant: ${tenantId})`)) {
-          console.warn(`Returning empty journal entries for tenant ${tenantId} due to DB connection issue.`);
+     if (checkPrismaInitError(error, context)) {
+          console.warn(`[DB_WARN] Database connection failed while fetching journal entries for tenant ${tenantId}. Returning empty list.`);
      } else {
         console.error(`[ACTION_ERROR] Error fetching journal entries for tenant ${tenantId}:`, error);
+        console.warn(`[DB_WARN] Returning empty journal entries list for tenant ${tenantId} due to unexpected error.`);
      }
     return [];
   }
@@ -75,6 +85,7 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
   const userId = await getUserId(); // Get current user ID
 
   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
+  const context = `addJournalEntry (Tenant: ${tenantId})`;
   // Decide if userId is mandatory for creating entries
   // if (!userId) return { success: false, message: 'User ID not found.' };
 
@@ -94,7 +105,7 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
 
    if (!basicValidation.success) {
         const fieldErrors = basicValidation.error.flatten().fieldErrors;
-        console.error(`[VALIDATION_ERROR] addJournalEntry (basic, Tenant: ${tenantId}):`, fieldErrors);
+        console.error(`[VALIDATION_ERROR] ${context} (basic):`, fieldErrors);
         return { success: false, message: 'Basic entry validation failed.', error: "Validation Error", fieldErrors };
     }
 
@@ -105,7 +116,7 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
      parsedLines = JSON.parse(rawData.lines as string);
      if (!Array.isArray(parsedLines)) throw new Error("Invalid lines format.");
    } catch (error) {
-     console.error(`[VALIDATION_ERROR] addJournalEntry (lines JSON, Tenant: ${tenantId}):`, error);
+     console.error(`[VALIDATION_ERROR] ${context} (lines JSON):`, error);
      return { success: false, message: 'Invalid journal entry lines data format.', error: "Validation Error", fieldErrors: { lines: ['Invalid lines format or missing lines.'] } };
    }
 
@@ -138,13 +149,13 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
    }
 
     if (lineErrors.length > 0) {
-        console.error(`[VALIDATION_ERROR] addJournalEntry (lines, Tenant: ${tenantId}):`, lineErrors);
+        console.error(`[VALIDATION_ERROR] ${context} (lines):`, lineErrors);
         return { success: false, message: 'Journal entry lines validation failed.', error: "Validation Error", fieldErrors: { lines: lineErrors } };
     }
 
    // Check balance
     if (Math.abs(totalDebits - totalCredits) >= 0.01) { // Use tolerance
-         console.error(`[VALIDATION_ERROR] addJournalEntry (balance, Tenant: ${tenantId}): Debits !== Credits`);
+         console.error(`[VALIDATION_ERROR] ${context} (balance): Debits !== Credits`);
          return { success: false, message: 'Validation failed: Total debits must equal total credits.', error: "Validation Error", fieldErrors: { lines: ['Total debits do not equal total credits.'] } };
     }
 
@@ -155,10 +166,13 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
             select: { id: true }
         });
         if (accounts.length !== accountIdsToCheck.length) {
-             console.error(`[VALIDATION_ERROR] addJournalEntry (account ownership, Tenant: ${tenantId}): Mismatch found.`);
+             console.error(`[VALIDATION_ERROR] ${context} (account ownership): Mismatch found.`);
              return { success: false, message: 'One or more selected accounts do not belong to this tenant.', error: "Validation Error", fieldErrors: { lines: ['Invalid account used in lines.'] } };
         }
     } catch (error) {
+        if(checkPrismaInitError(error, `${context} - Account Ownership Check`)) {
+           return { success: false, message: 'Database Connection Error during account validation.' };
+        }
         console.error(`[DB_ERROR] Error validating account ownership for tenant ${tenantId}:`, error);
         return { success: false, message: 'Database error during account validation.' };
     }
@@ -226,11 +240,11 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
     return { success: true, message: 'Journal entry created successfully.', data: result };
 
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, `addJournalEntry Transaction (Tenant: ${tenantId})`)) {
+    if (checkPrismaInitError(error, `${context} Transaction`)) {
         return { success: false, message: 'Database Connection Error. Failed to create journal entry.', error: 'Initialization Error' };
     }
 
-    console.error(`[DB_ERROR] Failed to create journal entry transaction for tenant ${tenantId}:`, error);
+    console.error(`[DB_ERROR] ${context} Transaction:`, error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
          // Handle specific errors like invalid foreign keys (accountId - less likely due to pre-check)
          if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('accountId')) {
@@ -254,6 +268,7 @@ export async function updateJournalEntry(formData: FormData): Promise<ActionResu
   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
    const entryId = formData.get('id') as string;
    if (!entryId) return { success: false, message: "Entry ID missing." };
+   const context = `updateJournalEntry (ID: ${entryId}, Tenant: ${tenantId})`;
 
     // Verify entry belongs to the tenant
     try {
@@ -261,6 +276,10 @@ export async function updateJournalEntry(formData: FormData): Promise<ActionResu
         if (!entry) return { success: false, message: 'Journal entry not found.' };
         if (entry.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
     } catch (error) {
+         if (checkPrismaInitError(error, `${context} - Ownership Check`)) {
+             return { success: false, message: 'Database Connection Error during ownership check.' };
+         }
+        console.error(`[DB_ERROR] Error verifying entry ownership in ${context}:`, error);
         return { success: false, message: 'Database error verifying entry ownership.' };
     }
 
@@ -283,6 +302,7 @@ export async function deleteJournalEntry(id: string): Promise<ActionResult> {
    const tenantId = await getTenantId();
    if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
    if (!id) return { success: false, message: "Entry ID missing." };
+   const context = `deleteJournalEntry (ID: ${id}, Tenant: ${tenantId})`;
 
    // --- Transaction Logic ---
     try {
@@ -335,10 +355,10 @@ export async function deleteJournalEntry(id: string): Promise<ActionResult> {
         return { success: true, message: 'Journal entry deleted successfully.' };
 
     } catch (error: unknown) {
-         if (checkPrismaInitError(error, `deleteJournalEntry Transaction (${id}, Tenant: ${tenantId})`)) {
+         if (checkPrismaInitError(error, `${context} Transaction`)) {
              return { success: false, message: 'Database Connection Error. Failed to delete entry.', error: 'Initialization Error' };
          }
-         console.error(`[DB_ERROR] Failed to delete journal entry ${id} for tenant ${tenantId}:`, error);
+         console.error(`[DB_ERROR] ${context} Transaction:`, error);
          if (error instanceof Error && (error.message === 'Journal entry not found.' || error.message.startsWith('Authorization Error'))) {
               return { success: false, message: error.message };
           }

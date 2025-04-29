@@ -3,8 +3,8 @@
 
 import { revalidatePath } from 'next/cache';
 import prisma from '@/lib/prisma';
-import { tenantSchema, tenantFormSchema, TenantSchema } from '@/lib/schemas/tenant';
 import { Prisma } from '@prisma/client';
+import { tenantSchema, tenantFormSchema, TenantSchema } from '@/lib/schemas/tenant';
 import { isSuperAdmin } from '@/lib/utils/tenant'; // Import check for super admin
 
 // Type definition for action results
@@ -16,13 +16,22 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Helper function to check and log Prisma init errors (assume it exists)
+// Flag to prevent spamming the console with the same libssl error
+let libsslErrorLogged = false;
+
+// Helper function to check and log Prisma init errors
+// Returns true if it WAS an initialization error, false otherwise
 function checkPrismaInitError(error: unknown, context: string): boolean {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         return true;
+         // Log the more detailed environment message only once
+         if (error.message.includes('libssl') && !libsslErrorLogged) {
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
+             libsslErrorLogged = true; // Prevent repeated logging
+         }
+         return true; // Indicate that it was an initialization error
      }
-     return false;
+     return false; // Not an initialization error
 }
 
 // --- Super Admin: Get All Tenants ---
@@ -39,7 +48,7 @@ export async function getAllTenants(): Promise<ActionResult> {
     return { success: true, message: 'Tenants fetched successfully.', data: tenants.map(t => tenantSchema.parse(t)) };
   } catch (error) {
     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        return { success: false, message: 'Database Connection Error. Failed to fetch tenants.', error: 'Initialization Error' };
     }
     console.error(`[ACTION_ERROR] ${context}:`, error);
     return { success: false, message: 'Failed to fetch tenants.', error };
@@ -51,6 +60,7 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
   if (!await isSuperAdmin()) {
     return { success: false, message: 'Unauthorized.' };
   }
+  const context = 'createTenant';
 
   const rawData = Object.fromEntries(formData.entries());
   const validatedFields = tenantFormSchema.safeParse({
@@ -62,7 +72,6 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
     return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
   }
 
-  const context = 'createTenant';
   try {
     const newTenant = await prisma.tenant.create({
       data: validatedFields.data,
@@ -79,7 +88,7 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Tenant "${newTenant.name}" created successfully.`, data: tenantSchema.parse(newTenant) };
   } catch (error) {
     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        return { success: false, message: 'Database Connection Error. Failed to create tenant.', error: 'Initialization Error' };
     }
     console.error(`[DB_ERROR] ${context}:`, error);
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -97,6 +106,7 @@ export async function updateTenant(formData: FormData): Promise<ActionResult> {
 
   const tenantId = formData.get('id') as string;
   if (!tenantId) return { success: false, message: 'Tenant ID missing.' };
+  const context = `updateTenant (ID: ${tenantId})`;
 
   const rawData = Object.fromEntries(formData.entries());
   const validatedFields = tenantFormSchema.safeParse({ name: rawData.name }); // Only name is updatable here
@@ -106,7 +116,6 @@ export async function updateTenant(formData: FormData): Promise<ActionResult> {
     return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
   }
 
-  const context = `updateTenant (ID: ${tenantId})`;
   try {
     const updatedTenant = await prisma.tenant.update({
       where: { id: tenantId },
@@ -116,7 +125,7 @@ export async function updateTenant(formData: FormData): Promise<ActionResult> {
     return { success: true, message: 'Tenant updated successfully.', data: tenantSchema.parse(updatedTenant) };
   } catch (error) {
     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        return { success: false, message: 'Database Connection Error. Failed to update tenant.', error: 'Initialization Error' };
     }
     console.error(`[DB_ERROR] ${context}:`, error);
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
@@ -137,8 +146,8 @@ export async function deleteTenant(id: string): Promise<ActionResult> {
     return { success: false, message: 'Unauthorized.' };
   }
   if (!id) return { success: false, message: 'Tenant ID missing.' };
-
   const context = `deleteTenant (ID: ${id})`;
+
   try {
     // Ensure the tenant exists before attempting deletion
     const tenant = await prisma.tenant.findUnique({ where: { id } });
@@ -154,7 +163,7 @@ export async function deleteTenant(id: string): Promise<ActionResult> {
     return { success: true, message: 'Tenant deleted successfully.' };
   } catch (error) {
      if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error.', error: 'Initialization Error' };
+        return { success: false, message: 'Database Connection Error. Failed to delete tenant.', error: 'Initialization Error' };
     }
     console.error(`[DB_ERROR] ${context}:`, error);
      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
