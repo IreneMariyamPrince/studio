@@ -1,3 +1,4 @@
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -41,7 +42,11 @@ export async function getBudgets(filters?: { year?: number }): Promise<BudgetSch
   } catch (error) {
      if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[ACTION_ERROR] Prisma Initialization Error fetching budgets:", error.message);
-        console.error("Database connection failed.");
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
+         } else {
+              console.error("Database connection failed. Returning empty list.");
+         }
         return [];
     }
     console.error("[ACTION_ERROR] Error fetching budgets:", error);
@@ -96,6 +101,9 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
        }
      } else if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[DB_ERROR] Prisma Initialization Error during budget creation:", error.message);
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+         }
         return {
             success: false,
             message: 'Database Connection Error. Failed to add budget.',

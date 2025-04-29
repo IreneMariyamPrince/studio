@@ -1,3 +1,4 @@
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -25,10 +26,11 @@ export async function getAccounts(): Promise<AccountSchema[]> {
     if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[ACTION_ERROR] Prisma Initialization Error fetching accounts:", error.message);
         if (error.message.includes('libssl')) {
-          console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
+          console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL is installed and accessible in your deployment environment. Returning empty list.");
+        } else {
+             console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs. Returning empty list.");
         }
         // Instead of throwing, log the error and return empty array to prevent page crash
-        console.error("Database connection failed. Please check server logs for details.");
         return [];
     } else {
         // Log other types of errors
@@ -96,7 +98,9 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
       }
     } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account creation:", error.message);
-         // Add libssl check if needed
+          if (error.message.includes('libssl')) {
+               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+           }
          return { success: false, message: 'Database Connection Error: Could not connect to the database.', error: 'Initialization Error' };
      }
     return { success: false, message: 'Database Error: Failed to create account.', error: error instanceof Error ? error.message : String(error) };
@@ -156,6 +160,9 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
         }
       } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account update:", error.message);
+          if (error.message.includes('libssl')) {
+               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+           }
          return { success: false, message: 'Database Initialization Error.', error: 'Initialization Error' };
      }
      return { success: false, message: 'Database Error: Failed to update account.', error: error instanceof Error ? error.message : String(error) };
@@ -203,6 +210,9 @@ export async function deleteAccount(id: string): Promise<ActionResult> {
         }
       } else if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[DB_ERROR] Prisma Initialization Error during account deletion:", error.message);
+          if (error.message.includes('libssl')) {
+               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+           }
          return { success: false, message: 'Database Initialization Error.', error: 'Initialization Error' };
      }
      return { success: false, message: 'Database Error: Failed to delete account.', error: error instanceof Error ? error.message : String(error) };
@@ -223,7 +233,9 @@ export async function getAccountById(id: string): Promise<AccountSchema | null> 
   } catch (error: unknown) {
      if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error(`[ACTION_ERROR] Prisma Initialization Error fetching account ${id}:`, error.message);
-        // Add libssl check
+          if (error.message.includes('libssl')) {
+               console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+           }
         console.error("Database connection failed.");
         return null;
      } else {

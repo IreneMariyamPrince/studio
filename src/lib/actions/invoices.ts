@@ -7,7 +7,6 @@ import prisma from '@/lib/prisma';
 import { invoiceSchema, invoiceItemSchema, InvoiceSchema, invoiceFormSchema } from '@/lib/schemas/invoice';
 import { clientSchema } from '@/lib/schemas/client'; // Ensure client schema is correctly imported
 import type { Prisma } from '@prisma/client'; // Import Prisma types
-import { getClients as fetchClients } from './clients'; // Import client action for internal use if needed
 
 // Type definition for action results
 type ActionResult = {
@@ -23,6 +22,7 @@ type ActionResult = {
 
 // Helper to generate the next invoice number
 async function getNextInvoiceNumber(): Promise<string> {
+    const fallbackNumber = `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
     try {
       const lastInvoice = await prisma.invoice.findFirst({
         orderBy: { createdAt: 'desc' },
@@ -44,11 +44,15 @@ async function getNextInvoiceNumber(): Promise<string> {
   } catch (error) {
        if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[HELPER_ERROR] Prisma Initialization Error getting next invoice number:", error.message);
-             console.error("Database connection failed.");
-             return `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+             if (error.message.includes('libssl')) {
+                 console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning fallback invoice number.");
+             } else {
+                 console.error("Database connection failed. Returning fallback invoice number.");
+             }
+             return fallbackNumber;
        }
       console.error("[HELPER_ERROR] Failed to get next invoice number:", error);
-      return `INV-${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`;
+      return fallbackNumber;
   }
 }
 
@@ -90,7 +94,11 @@ export async function getInvoices(): Promise<InvoiceSchema[]> {
   } catch (error) {
      if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching invoices:", error.message);
-             console.error("Database connection failed.");
+             if (error.message.includes('libssl')) {
+                 console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
+             } else {
+                 console.error("Database connection failed. Returning empty list.");
+             }
              return [];
        }
     console.error("[ACTION_ERROR] Error fetching invoices:", error);
@@ -147,7 +155,11 @@ export async function getInvoiceById(id: string): Promise<InvoiceSchema | null> 
   } catch (error) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error(`[ACTION_ERROR] Prisma Initialization Error fetching invoice ${id}:`, error.message);
-             console.error("Database connection failed.");
+             if (error.message.includes('libssl')) {
+                 console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed.");
+             } else {
+                  console.error("Database connection failed.");
+             }
              return null;
        }
      console.error(`[ACTION_ERROR] Error fetching invoice ${id}:`, error);
@@ -293,6 +305,9 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
           }
      } else if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[DB_ERROR] Prisma Initialization Error during invoice creation:", error.message);
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+         }
         return { success: false, message: 'Database Connection Error. Failed to create invoice.', error: 'Initialization Error' };
     }
     return { success: false, message: 'Database Error: Failed to create invoice.', error: error instanceof Error ? error.message : String(error) };
@@ -339,13 +354,11 @@ export async function deleteInvoice(id: string): Promise<ActionResult> {
          return { success: false, message: 'Invoice not found.', error: error.code };
      } else if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[DB_ERROR] Prisma Initialization Error during invoice deletion:", error.message);
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+         }
         return { success: false, message: 'Database Connection Error. Failed to delete invoice.', error: 'Initialization Error' };
     }
     return { success: false, message: 'Database Error: Failed to delete invoice.', error: error instanceof Error ? error.message : String(error) };
   }
 }
-
-// Need to export this function explicitly if it's used elsewhere
-export { fetchClients };
-
-    

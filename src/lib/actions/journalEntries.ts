@@ -1,3 +1,4 @@
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -41,7 +42,11 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
   } catch (error) {
      if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[ACTION_ERROR] Prisma Initialization Error fetching journal entries:", error.message);
-        console.error("Database connection failed.");
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
+         } else {
+              console.error("Database connection failed. Returning empty list.");
+         }
         return [];
     }
     console.error("[ACTION_ERROR] Error fetching journal entries:", error);
@@ -189,6 +194,9 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
          }
      } else if (error instanceof Prisma.PrismaClientInitializationError) {
         console.error("[DB_ERROR] Prisma Initialization Error during journal entry creation:", error.message);
+         if (error.message.includes('libssl')) {
+              console.error("DATABASE CONNECTION FAILED: Missing `libssl` system library.");
+         }
         return {
             success: false,
             message: 'Database Connection Error. Failed to create journal entry.',

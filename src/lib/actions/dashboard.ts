@@ -65,6 +65,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
             initializationErrorOccurred = true;
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching dashboard stats subset:", result.reason.message);
             if (result.reason.message.includes('libssl')) {
+                 // Log the specific environment issue once
                 console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL is installed and accessible in your deployment environment.");
             } else {
                 console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs.");
@@ -77,8 +78,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     }
 
      // If a critical DB connection error occurred, return defaults immediately.
-     if (initializationErrorOccurred && results.some(r => r.status === 'rejected' && r.reason instanceof Prisma.PrismaClientInitializationError && r.reason.message.includes('libssl'))) {
-         console.warn("Returning default dashboard stats due to database connection failure (libssl issue).");
+     if (initializationErrorOccurred) {
+         console.warn("Returning default dashboard stats due to database connection failure.");
          return defaultStats;
      }
 
@@ -121,7 +122,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
      if (error instanceof Prisma.PrismaClientInitializationError) {
          console.error("[ACTION_ERROR] Top-Level Prisma Initialization Error fetching dashboard stats:", error.message);
          if (error.message.includes('libssl')) {
-            console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library. This is an ENVIRONMENT ISSUE. Ensure OpenSSL (e.g., libssl.so.1.1) is installed.");
+             // Log the specific environment issue once
+             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL is installed and accessible in your deployment environment.");
          } else {
              console.error("DATABASE CONNECTION FAILED: Prisma failed to initialize. Check database connection details and server logs.");
          }
@@ -150,9 +152,9 @@ export async function getRecentExpenses(limit = 5) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent expenses:", error.message);
              if (error.message.includes('libssl')) {
-                 console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library. This is an ENVIRONMENT ISSUE. Ensure OpenSSL is installed.");
+                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Missing `libssl` system library. Ensure OpenSSL is installed. Returning empty list.");
              } else {
-                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Prisma failed to initialize.");
+                  console.error("DATABASE CONNECTION FAILED (Recent Expenses): Prisma failed to initialize. Returning empty list.");
              }
              // Return empty array to prevent breaking UI completely
              return [];
@@ -178,9 +180,9 @@ export async function getRecentInvoices(limit = 5) {
        if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent invoices:", error.message); // Log the actual error message
              if (error.message.includes('libssl')) {
-                  console.error("DATABASE CONNECTION FAILED (Recent Invoices): Missing `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Ensure OpenSSL is installed and accessible in your deployment environment.");
+                  // Only log the specific root cause once.
              } else {
-                  console.error("DATABASE CONNECTION FAILED (Recent Invoices): Prisma failed to initialize. Check connection details/logs.");
+                  console.error("DATABASE CONNECTION FAILED (Recent Invoices): Prisma failed to initialize. Check connection details/logs. Returning empty list.");
              }
              // Return empty array to prevent breaking UI completely
              return [];

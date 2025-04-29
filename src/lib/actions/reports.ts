@@ -1,3 +1,4 @@
+
 'use server';
 
 import prisma from '@/lib/prisma';
@@ -84,7 +85,7 @@ export interface ARAgingData {
     bucket: 'Current' | '1-30' | '31-60' | '61-90' | '90+';
 }
 
-export async function getArAgingData(asOfDate: Date): Promise<ArAgingData[]> {
+export async function getArAgingData(asOfDate: Date): Promise<ARAgingData[]> {
     console.log(`Generating A/R Aging as of ${asOfDate.toISOString()}`);
     // 1. Fetch all unpaid/partially paid invoices
     // 2. Calculate days overdue based on dueDate and asOfDate
@@ -101,15 +102,17 @@ export async function getArAgingData(asOfDate: Date): Promise<ArAgingData[]> {
 // --- Helper function to handle potential Prisma initialization errors ---
 // Wrap your prisma calls within individual try/catch blocks inside report functions
 // or create a higher-level function to manage this if needed.
-// Example:
 async function safePrismaCall<T>(prismaPromise: Promise<T>, fallback: T): Promise<T> {
     try {
         return await prismaPromise;
     } catch (error) {
         if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[REPORT_ERROR] Prisma Initialization Error:", error.message);
-            console.error("Database connection failed while generating report data.");
-            // Potentially throw a specific error or return fallback data
+             if (error.message.includes('libssl')) {
+                 // Log only the root cause message once if needed elsewhere
+             } else {
+                console.error("Database connection failed while generating report data.");
+             }
         } else {
             console.error("[REPORT_ERROR] Error fetching report data:", error);
         }
