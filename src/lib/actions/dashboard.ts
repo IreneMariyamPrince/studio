@@ -3,7 +3,7 @@
 
 import prisma from '@/lib/prisma';
 import { endOfMonth, startOfMonth } from 'date-fns';
-import type { Prisma } from '@prisma/client'; // Import Prisma types
+import type { Prisma } from '@prisma/client'; // Import Prisma namespace
 
 export interface DashboardStats {
   totalExpensesThisMonth: number;
@@ -73,7 +73,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
                 console.error("This might be due to missing system libraries like 'libssl'. Please check the environment configuration.");
             }
             console.error("Database connection failed. Please check server logs.");
-            return defaultStats; // Return default stats if connection failed
+            // Return empty array to prevent breaking UI completely
+            return defaultStats;
         } else if (result.status === 'rejected') {
             // Log other errors but potentially continue if possible
             console.error("[ACTION_ERROR] Error fetching dashboard data subset:", result.reason);
@@ -81,10 +82,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     }
 
     // Calculate stats from successful results, default to 0 if a query failed for other reasons
-    const totalExpensesThisMonth = expensesThisMonthRes.status === 'fulfilled' ? expensesThisMonthRes.value._sum.amount ?? 0 : 0;
-    const totalExpensesLastMonth = expensesLastMonthRes.status === 'fulfilled' ? expensesLastMonthRes.value._sum.amount ?? 0 : 0;
+    const totalExpensesThisMonth = expensesThisMonthRes.status === 'fulfilled' ? expensesThisMonthRes.value._sum.amount?.toNumber() ?? 0 : 0;
+    const totalExpensesLastMonth = expensesLastMonthRes.status === 'fulfilled' ? expensesLastMonthRes.value._sum.amount?.toNumber() ?? 0 : 0;
     const pendingInvoicesCount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._count.id ?? 0 : 0;
-    const pendingInvoicesAmount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._sum.total ?? 0 : 0;
+    const pendingInvoicesAmount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._sum.total?.toNumber() ?? 0 : 0;
     const openExpenseReportsCount = openExpensesRes.status === 'fulfilled' ? openExpensesRes.value._count.id ?? 0 : 0;
     const activeAccountsCount = accountsCountRes.status === 'fulfilled' ? accountsCountRes.value ?? 0 : 0;
 
@@ -122,7 +123,11 @@ export async function getRecentExpenses(limit = 5) {
        orderBy: { date: 'desc' },
        include: { account: { select: { name: true } } }, // Include account name
      });
-     return expenses;
+     // Parse Decimal to number for amount
+     return expenses.map(exp => ({
+         ...exp,
+         amount: exp.amount.toNumber()
+     }));
    } catch (error) {
       if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent expenses:", error.message);
@@ -130,7 +135,8 @@ export async function getRecentExpenses(limit = 5) {
                  console.error("Check 'libssl' dependency.");
              }
              console.error("Database connection failed.");
-             return []; // Return empty on connection failure
+             // Return empty array to prevent breaking UI completely
+             return [];
        }
       console.error("Error fetching recent expenses:", error);
       return [];
@@ -144,7 +150,11 @@ export async function getRecentInvoices(limit = 5) {
        orderBy: { issueDate: 'desc' },
        include: { client: { select: { name: true } } }, // Include client name
      });
-     return invoices;
+      // Parse Decimal to number for total
+     return invoices.map(inv => ({
+        ...inv,
+        total: inv.total.toNumber()
+    }));
    } catch (error) {
        if (error instanceof Prisma.PrismaClientInitializationError) {
             console.error("[ACTION_ERROR] Prisma Initialization Error fetching recent invoices:", error.message);
@@ -152,7 +162,8 @@ export async function getRecentInvoices(limit = 5) {
                  console.error("Check 'libssl' dependency.");
              }
              console.error("Database connection failed.");
-             return []; // Return empty on connection failure
+             // Return empty array to prevent breaking UI completely
+             return [];
        }
       console.error("Error fetching recent invoices:", error);
       return [];
