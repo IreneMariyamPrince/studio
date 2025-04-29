@@ -1,7 +1,7 @@
 'use client';
 
 import type { FC } from 'react';
-import { Menu, Search, User, Settings, LogOut, Bell } from 'lucide-react';
+import { Menu, Search, User, Settings, LogOut, Bell, Cloud, CloudOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -17,6 +17,8 @@ import { SidebarNav } from './sidebar-nav'; // Assuming SidebarNav exists
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { useDbStatus } from '@/hooks/use-db-status'; // Import the hook
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'; // Import Tooltip components
 
 interface HeaderProps {
   onMenuClick?: () => void;
@@ -24,6 +26,8 @@ interface HeaderProps {
 }
 
 export const Header: FC<HeaderProps> = ({ onMenuClick, className }) => {
+  const { isConnected, isLoading } = useDbStatus();
+
   return (
     <header
       className={cn(
@@ -67,7 +71,26 @@ export const Header: FC<HeaderProps> = ({ onMenuClick, className }) => {
         </div> */}
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 md:gap-4">
+         {/* DB Status Indicator */}
+        <Tooltip>
+            <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="rounded-full" aria-label={`Database Status: ${isLoading ? 'Checking' : isConnected ? 'Connected' : 'Disconnected'}`}>
+                {isLoading ? (
+                    <CloudOff className="h-5 w-5 animate-pulse text-muted-foreground" /> // Use pulse for loading
+                ) : isConnected ? (
+                    <Cloud className="h-5 w-5 text-green-500" />
+                ) : (
+                    <CloudOff className="h-5 w-5 text-destructive" />
+                )}
+                </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+                <p>{isLoading ? 'Checking Connection...' : isConnected ? 'Database Connected' : 'Database Disconnected'}</p>
+                {!isConnected && !isLoading && <p className="text-xs text-muted-foreground">App functionality may be limited.</p>}
+            </TooltipContent>
+        </Tooltip>
+
         {/* Notifications (Optional) */}
         <Button variant="ghost" size="icon" className="rounded-full">
           <Bell className="h-5 w-5" />
