@@ -5,7 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import prisma from '@/lib/prisma';
 import { accountSchema, AccountSchema } from '@/lib/schemas/account';
-import type { Prisma } from '@prisma/client'; // Import Prisma types
+import { Prisma } from '@prisma/client'; // Import Prisma namespace
 
 // Type definition for the result of actions
 type ActionResult = { success: boolean; message: string; error?: unknown; fieldErrors?: Record<string, string[]> };
