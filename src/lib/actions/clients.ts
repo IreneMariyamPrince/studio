@@ -1,4 +1,3 @@
-
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -6,6 +5,7 @@ import { Collection, ObjectId, WithId } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { clientSchema, clientFormSchema, ClientSchema } from '@/lib/schemas/client';
 import { getTenantId } from '@/lib/utils/tenant';
+import { z } from 'zod'; // Import z
 
 // Type definition for MongoDB documents
 type ClientDocument = Omit<ClientSchema, 'id'> & { _id?: ObjectId; tenantId: string; createdAt?: Date; updatedAt?: Date };
@@ -117,7 +117,7 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
   } catch (error: unknown) {
     console.error(`[DB_ERROR] ${context}:`, error);
     // Handle potential duplicate key errors if index is set on email+tenantId
-    if ((error as any).code === 11000 && (error as any).message.includes('email')) { // Basic check for duplicate key error on email
+    if ((error as any).code === 11000 && (error as any).message.includes('email')) {
         return {
             success: false,
             message: 'Database Error: A client with this email already exists for this tenant.',
@@ -167,7 +167,7 @@ export async function updateClient(formData: FormData): Promise<ActionResult> {
    if (!validatedFields.success) {
         const fieldErrors = validatedFields.error.flatten().fieldErrors;
         console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
-        return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
+        return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
     }
 
     const { id, ...updateData } = validatedFields.data;
