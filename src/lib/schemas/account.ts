@@ -5,8 +5,7 @@ import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 export const accountTypes = ['Asset', 'Liability', 'Equity', 'Revenue', 'Expense'] as const;
 
 export const accountSchema = z.object({
-  // id: z.string().cuid().optional(), // CUID is usually for Prisma
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
+  id: z.string().optional(), // Optional for creation, required for updates handled separately
   code: z.string().min(3, { message: "Account code must be at least 3 characters." }).max(10, { message: "Account code cannot exceed 10 characters."}),
   name: z.string().min(2, { message: "Account name must be at least 2 characters." }),
   type: z.enum(accountTypes, { required_error: "Please select an account type." }),

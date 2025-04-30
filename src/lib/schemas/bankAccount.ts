@@ -3,8 +3,7 @@ import { z } from 'zod';
 import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const bankAccountSchema = z.object({
-  // id: z.string().cuid().optional(), // Optional for creation
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(1, { message: "Account name is required." }),
   accountNumber: z.string().optional(), // Store masked or partial for security
   bankName: z.string().optional(),

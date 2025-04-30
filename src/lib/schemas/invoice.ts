@@ -6,18 +6,16 @@ import { taxRateSchema } from './taxRate'; // Import TaxRate schema
 import { accountSchema } from './account'; // Import Account schema
 
 export const invoiceItemSchema = z.object({
-  // id: z.string().cuid().optional(), // Optional for creation
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Item ObjectId" }).optional(), // Validate as ObjectId string
-  // invoiceId: z.string().cuid().optional(), // Optional for creation, linked later
-  invoiceId: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Invoice ObjectId" }).optional(), // Validate as ObjectId string
+
+  id: z.string().optional(), // Optional for creation
+  invoiceId: z.string().optional(), // Optional for creation, linked later
   description: z.string().min(1, { message: "Item description cannot be empty." }),
   quantity: z.coerce.number().int().positive({ message: "Quantity must be positive." }),
   unitPrice: z.coerce.number().nonnegative({ message: "Unit price cannot be negative." }),
   total: z.coerce.number().optional(), // Calculated field (quantity * unitPrice + tax)
-  // taxRateId: z.string().cuid().optional(), // Optional link to TaxRate
-  taxRateId: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Tax Rate ObjectId" }).optional(), // Validate as ObjectId string
-  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
-  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  taxRateId: z.string().optional(), // Optional link to TaxRate
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
 
   // Optional relation data (Ensure TaxRateSchema also uses ObjectId validation if included)
   // taxRate: taxRateSchema.optional(),
@@ -28,21 +26,20 @@ export type InvoiceItemSchema = z.infer<typeof invoiceItemSchema>;
 export const invoiceStatus = ['Draft', 'Pending', 'Paid', 'Partial', 'Overdue', 'Cancelled'] as const;
 
 export const invoiceSchema = z.object({
-  // id: z.string().cuid().optional(), // Optional for creation
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
+
+  id: z.string().optional(), // Optional for creation
   invoiceNumber: z.string().optional(), // Generated on creation
-  // clientId: z.string().cuid({ message: "Please select a client." }),
-  clientId: z.string({ required_error: "Client is required." }).refine((val) => ObjectId.isValid(val), { message: "Invalid Client ObjectId" }), // Validate as ObjectId string
-  issueDate: z.coerce.date({ required_error: "Issue date is required." }).or(z.string().datetime()), // Allow Date or ISO string
-  dueDate: z.coerce.date({ required_error: "Due date is required." }).or(z.string().datetime()), // Allow Date or ISO string
+  clientId: z.string({ message: "Please select a client." }),
+  issueDate: z.coerce.date({ required_error: "Issue date is required." }),
+  dueDate: z.coerce.date({ required_error: "Due date is required." }),
   status: z.enum(invoiceStatus),
   notes: z.string().optional(),
   items: z.array(invoiceItemSchema).min(1, { message: "Invoice must have at least one item." }),
   total: z.coerce.number().optional(), // Calculated field (sum of item totals)
-  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
-  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
-  // revenueAccountId: z.string().cuid().optional(), // Optional link to revenue account
-  revenueAccountId: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Revenue Account ObjectId" }).optional(), // Validate as ObjectId string
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
+  revenueAccountId: z.string().optional(), // Optional link to revenue account
+
 
   // Related data included from fetches (Ensure related schemas use ObjectId validation)
   client: clientSchema.optional(),

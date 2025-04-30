@@ -6,12 +6,10 @@ import { accountSchema } from './account'; // Assuming account schema exists
 export const entryTypes = ['Debit', 'Credit'] as const;
 
 export const journalEntryLineSchema = z.object({
-  // id: z.string().cuid().optional(),
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Line ObjectId" }).optional(), // Validate as ObjectId string
-  // journalEntryId: z.string().cuid().optional(), // Linked on creation
-  journalEntryId: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid Journal Entry ObjectId" }).optional(), // Validate as ObjectId string
-  // accountId: z.string().cuid({ message: "Account is required for each line." }),
-  accountId: z.string({ required_error: "Account is required for each line." }).refine((val) => ObjectId.isValid(val), { message: "Invalid Account ObjectId" }), // Validate as ObjectId string
+
+  id: z.string().optional(),
+  journalEntryId: z.string().optional(), // Linked on creation
+  accountId: z.string({ message: "Account is required for each line." }),
   type: z.enum(entryTypes, { required_error: "Entry type (Debit/Credit) is required." }),
   amount: z.coerce.number().positive({ message: "Amount must be positive." }),
   description: z.string().optional(),
@@ -24,15 +22,14 @@ export const journalEntryLineSchema = z.object({
 export type JournalEntryLineSchema = z.infer<typeof journalEntryLineSchema>;
 
 export const journalEntrySchema = z.object({
-  // id: z.string().cuid().optional(),
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
-  entryDate: z.coerce.date({ required_error: "Entry date is required." }).or(z.string().datetime()), // Allow Date or ISO string
+  id: z.string().optional(),
+  entryDate: z.coerce.date({ required_error: "Entry date is required." }),
   description: z.string().min(1, { message: "Description is required." }),
   reference: z.string().optional(),
-  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
-  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
-  // createdById: z.string().cuid().optional(), // Link to User
-  createdById: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid User ObjectId" }).optional(), // Validate as ObjectId string
+  createdAt: z.coerce.date().optional(),
+  updatedAt: z.coerce.date().optional(),
+  createdById: z.string().optional(), // Link to User
+
 
   // Array of lines
   lines: z.array(journalEntryLineSchema).min(2, { message: "A journal entry must have at least two lines (one debit, one credit)." })

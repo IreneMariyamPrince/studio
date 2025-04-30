@@ -3,8 +3,7 @@ import { z } from 'zod';
 import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const vendorSchema = z.object({
-  // id: z.string().cuid().optional(), // Optional for creation
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(2, { message: "Vendor name must be at least 2 characters." }),
   email: z.string().email({ message: "Invalid email address." }).optional().or(z.literal('')), // Allow empty string or valid email
   phone: z.string().optional(),

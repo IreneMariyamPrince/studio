@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const taxRateSchema = z.object({
-  // id: z.string().cuid().optional(), // Optional for creation
-  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
+
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(1, { message: "Tax rate name is required." }), // e.g., "VAT", "GST"
   ratePercent: z.coerce.number().nonnegative({ message: "Rate must be non-negative." }).max(100, { message: "Rate cannot exceed 100." }), // e.g., 20.00 for 20%
   description: z.string().optional(),
