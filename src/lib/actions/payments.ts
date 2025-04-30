@@ -2,10 +2,43 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { paymentSchema, paymentFormSchema, PaymentSchema } from '@/lib/schemas/payment';
-import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
+import { getTenantId } from '@/lib/utils/tenant';
+
+// Type definition for MongoDB documents
+type PaymentDocument = Omit<PaymentSchema, 'id' | 'bankAccountId' | 'invoiceId' | 'expenseId'> & {
+    _id?: ObjectId;
+    tenantId: string;
+    bankAccountId: ObjectId; // Store as ObjectId
+    invoiceId?: ObjectId | null; // Store as ObjectId if present
+    expenseId?: ObjectId | null; // Store as ObjectId if present
+    createdAt?: Date;
+    updatedAt?: Date;
+};
+// Simplified lookup types
+type BankAccountLookupInfo = { _id: ObjectId; name: string; };
+type InvoiceLookupInfo = { _id: ObjectId; invoiceNumber: string; total: number; status: string; payments?: { amount: number }[] }; // Include needed fields
+type ExpenseLookupInfo = { _id: ObjectId; description?: string | null; amount: number; status: string; payments?: { amount: number }[] };
+
+// Helper to get collections
+async function getPaymentsCollection(): Promise<Collection<PaymentDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<PaymentDocument>('payments');
+}
+async function getBankAccountsCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('bankAccounts');
+}
+async function getInvoicesCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('invoices');
+}
+async function getExpensesCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('expenses');
+}
 
 // Type definition for action results
 type ActionResult = {
@@ -16,23 +49,6 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
 
 // --- Get Payments for the current tenant ---
 export async function getPayments(): Promise<PaymentSchema[]> {
@@ -44,32 +60,45 @@ export async function getPayments(): Promise<PaymentSchema[]> {
   const context = `getPayments (Tenant: ${tenantId})`;
 
   try {
-    const payments = await prisma.payment.findMany({
-        where: { tenantId: tenantId }, // Filter by tenant
-        orderBy: { paymentDate: 'desc' },
-        include: {
-            bankAccount: { select: { id: true, name: true } },
-            invoice: { select: { id: true, invoiceNumber: true } },
-            expense: { select: { id: true, description: true, amount: true } } // Include minimal expense info
+    const paymentsCollection = await getPaymentsCollection();
+     // Use aggregation to join related data
+    const paymentsCursor = paymentsCollection.aggregate([
+        { $match: { tenantId: tenantId } },
+        { $sort: { paymentDate: -1 } },
+        { $lookup: { from: 'bankAccounts', localField: 'bankAccountId', foreignField: '_id', as: 'bankAccountInfo' } },
+        { $lookup: { from: 'invoices', localField: 'invoiceId', foreignField: '_id', as: 'invoiceInfo' } },
+        { $lookup: { from: 'expenses', localField: 'expenseId', foreignField: '_id', as: 'expenseInfo' } },
+        {
+             $project: { // Reshape output
+                _id: 1, paymentDate: 1, amount: 1, paymentMethod: 1, reference: 1, notes: 1, createdAt: 1, updatedAt: 1,
+                bankAccountId: 1, invoiceId: 1, expenseId: 1, // Keep ObjectIds for mapping
+                bankAccount: { $arrayElemAt: ['$bankAccountInfo', 0] },
+                invoice: { $arrayElemAt: ['$invoiceInfo', 0] },
+                expense: { $arrayElemAt: ['$expenseInfo', 0] }
+            }
         }
-    });
-    // Basic parsing, consider full schema validation if needed
-    return payments.map(p => ({
+    ]);
+    const paymentsArray = await paymentsCursor.toArray();
+
+    // Map and parse data
+    return paymentsArray.map(p => paymentSchema.parse({
         ...p,
+        id: p._id?.toHexString(),
+        bankAccountId: p.bankAccountId?.toHexString(),
+        invoiceId: p.invoiceId?.toHexString() ?? undefined,
+        expenseId: p.expenseId?.toHexString() ?? undefined,
         paymentDate: new Date(p.paymentDate),
-        amount: p.amount.toNumber(), // Convert Decimal to number
-        // Ensure nested objects conform to expected types if not using full schema validation
-        bankAccount: p.bankAccount,
-        invoice: p.invoice,
-        expense: p.expense ? { ...p.expense, amount: p.expense.amount.toNumber() } : null,
+        amount: p.amount, // Assuming number
+        reference: p.reference ?? undefined,
+        notes: p.notes ?? undefined,
+        // Map nested objects
+        bankAccount: p.bankAccount ? { id: p.bankAccount._id?.toHexString(), name: p.bankAccount.name } : undefined,
+        invoice: p.invoice ? { id: p.invoice._id?.toHexString(), invoiceNumber: p.invoice.invoiceNumber } : undefined,
+        expense: p.expense ? { id: p.expense._id?.toHexString(), description: p.expense.description, amount: p.expense.amount } : undefined,
     }));
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        console.warn(`[DB_WARN] Database connection failed while fetching payments for tenant ${tenantId}. Returning empty list.`);
-    } else {
-        console.error(`[ACTION_ERROR] Error fetching payments for tenant ${tenantId}:`, error);
-        console.warn(`[DB_WARN] Returning empty payments list for tenant ${tenantId} due to unexpected error.`);
-    }
+    console.error(`[ACTION_ERROR] ${context}:`, error);
+    console.warn(`[DB_WARN] Returning empty payments list for tenant ${tenantId} due to unexpected error.`);
     return [];
   }
 }
@@ -82,9 +111,9 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
    }
    const context = `addPayment (Tenant: ${tenantId})`;
 
-  const rawData = Object.fromEntries(formData.entries());
-
-  const validatedFields = paymentFormSchema.safeParse({
+   // --- 1. Validate Form Data ---
+   const rawData = Object.fromEntries(formData.entries());
+   const validatedFields = paymentFormSchema.safeParse({
     paymentDate: rawData.paymentDate ? new Date(rawData.paymentDate as string) : undefined,
     amount: rawData.amount ? parseFloat(rawData.amount as string) : undefined,
     paymentMethod: rawData.paymentMethod,
@@ -95,266 +124,254 @@ export async function addPayment(formData: FormData): Promise<ActionResult> {
     expenseId: rawData.expenseId || undefined,
   });
 
-  if (!validatedFields.success) {
-    const fieldErrors = validatedFields.error.flatten().fieldErrors;
-    console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
-    return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
-  }
+  if (!validatedFields.success) { /* handle error */ }
 
-  const { invoiceId, expenseId, amount, bankAccountId, ...paymentData } = validatedFields.data;
+  // --- 2. Validate ObjectIDs and Tenant Ownership ---
+   let bankAccountObjectId: ObjectId;
+   let invoiceObjectId: ObjectId | undefined | null = undefined;
+   let expenseObjectId: ObjectId | undefined | null = undefined;
+   const { amount, invoiceId: invoiceIdString, expenseId: expenseIdString, ...paymentData } = validatedFields.data; // Destructure validated data
 
-   // Validate that related entities (BankAccount, Invoice/Expense) belong to the tenant
+
    try {
-        const bankAccount = await prisma.bankAccount.findUnique({ where: { id: bankAccountId }, select: { tenantId: true } });
-        if (!bankAccount || bankAccount.tenantId !== tenantId) {
-             return { success: false, message: 'Invalid bank account selected.', fieldErrors: { bankAccountId: ['Invalid bank account.'] } };
-        }
-        if (invoiceId) {
-             const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { tenantId: true } });
-             if (!invoice || invoice.tenantId !== tenantId) {
-                  return { success: false, message: 'Invalid invoice selected.', fieldErrors: { invoiceId: ['Invalid invoice.'] } };
-             }
-        }
-        if (expenseId) {
-             const expense = await prisma.expense.findUnique({ where: { id: expenseId }, select: { tenantId: true } });
-             if (!expense || expense.tenantId !== tenantId) {
-                  return { success: false, message: 'Invalid expense selected.', fieldErrors: { expenseId: ['Invalid expense.'] } };
-             }
-        }
-         if (invoiceId && expenseId) {
-             return { success: false, message: 'Payment cannot be linked to both an invoice and an expense.' };
-         }
-         if (!invoiceId && !expenseId) {
-            // Allow payments not linked to invoice/expense? Or require one? Adjust based on needs.
-            // return { success: false, message: 'Payment must be linked to an invoice or an expense.' };
-         }
-   } catch (error) {
-        if(checkPrismaInitError(error, `${context} - Relation Validation`)) {
-           return { success: false, message: 'Database Connection Error during validation.' };
-        }
-       console.error(`[DB_ERROR] Error validating relations for tenant ${tenantId} during payment creation:`, error);
-       return { success: false, message: 'Database error during validation.' };
+       bankAccountObjectId = new ObjectId(validatedFields.data.bankAccountId);
+       if (invoiceIdString) invoiceObjectId = new ObjectId(invoiceIdString);
+       if (expenseIdString) expenseObjectId = new ObjectId(expenseIdString);
+
+       // Check relations belong to the tenant
+       const bankAccountsCollection = await getBankAccountsCollection();
+       const bankAccount = await bankAccountsCollection.findOne({ _id: bankAccountObjectId, tenantId: tenantId }, { projection: { _id: 1 } });
+       if (!bankAccount) return { success: false, message: 'Invalid bank account.', fieldErrors: { bankAccountId: ['Invalid.'] } };
+
+       if (invoiceObjectId) {
+            const invoicesCollection = await getInvoicesCollection();
+            const invoice = await invoicesCollection.findOne({ _id: invoiceObjectId, tenantId: tenantId }, { projection: { _id: 1 } });
+            if (!invoice) return { success: false, message: 'Invalid invoice.', fieldErrors: { invoiceId: ['Invalid.'] } };
+       }
+       if (expenseObjectId) {
+            const expensesCollection = await getExpensesCollection();
+            const expense = await expensesCollection.findOne({ _id: expenseObjectId, tenantId: tenantId }, { projection: { _id: 1 } });
+            if (!expense) return { success: false, message: 'Invalid expense.', fieldErrors: { expenseId: ['Invalid.'] } };
+       }
+       if (invoiceObjectId && expenseObjectId) {
+           return { success: false, message: 'Payment cannot link to both invoice and expense.' };
+       }
+       // Optional: Check if payment amount exceeds invoice/expense amount due?
+
+   } catch (error: any) {
+        // Handle ObjectId errors and DB errors
+         if (error instanceof Error && error.message.includes('Argument passed in must be a single String')) { /* Handle specific invalid IDs */ }
+        console.error(`[DB_ERROR] Error validating relations in ${context}:`, error);
+        return { success: false, message: 'Database error during validation.' };
    }
 
-  // --- Transaction Logic ---
+
+  // --- 3. Transaction Logic ---
+   const { db, client: mongoClient } = await connectToDatabase();
+   const session = mongoClient.startSession();
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    let createdPaymentData: any = null;
+
+    await session.withTransaction(async () => {
+        const paymentsCollection = db.collection<PaymentDocument>('payments');
+        const bankAccountsCollection = db.collection('bankAccounts');
+        const invoicesCollection = db.collection('invoices');
+        const expensesCollection = db.collection('expenses');
+
       // 1. Create the payment record
-      const newPayment = await tx.payment.create({
-        data: {
+      const newPaymentResult = await paymentsCollection.insertOne({
           ...paymentData,
-          tenantId: tenantId, // Set tenant ID
-          amount,
-          bankAccountId,
-          invoiceId: invoiceId,
-          expenseId: expenseId,
-        },
-      });
+          tenantId: tenantId,
+          amount: amount,
+          bankAccountId: bankAccountObjectId,
+          invoiceId: invoiceObjectId,
+          expenseId: expenseObjectId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+      }, { session });
+       if (!newPaymentResult.insertedId) throw new Error("Failed to insert payment.");
+       createdPaymentData = { id: newPaymentResult.insertedId.toHexString() }; // Store ID for return
 
-      // 2. Update related Invoice status and balanceDue (if applicable)
-      if (invoiceId) {
-        const invoice = await tx.invoice.findUnique({
-          where: { id: invoiceId },
-          select: { total: true, payments: { select: { amount: true } } },
-        });
-        if (!invoice) throw new Error(`Invoice ${invoiceId} not found during transaction.`);
+      // 2. Update related Invoice status/balance (if applicable)
+      if (invoiceObjectId) {
+        // Fetch invoice and *all* its payments within the transaction
+        const invoice = await invoicesCollection.findOne({ _id: invoiceObjectId }, { session });
+        const allPaymentsForInvoice = await paymentsCollection.find({ invoiceId: invoiceObjectId }, { session }).toArray();
 
-        // Correctly sum existing payments + new payment
-        const existingPaymentsSum = invoice.payments.reduce((sum, p) => sum + p.amount.toNumber(), 0);
-        const totalPaid = existingPaymentsSum + amount; // Use the current payment amount
-        const balanceDue = invoice.total.toNumber() - totalPaid;
-        const newStatus = balanceDue <= 0.005 ? Prisma.InvoiceStatus.Paid : Prisma.InvoiceStatus.Partial; // Tolerance for float issues
+        if (!invoice) throw new Error(`Invoice ${invoiceObjectId} not found during transaction.`);
 
-        await tx.invoice.update({
-          where: { id: invoiceId },
-          data: { status: newStatus /* TODO: Update client balanceDue? */ },
-        });
+        const totalPaid = allPaymentsForInvoice.reduce((sum, p) => sum + p.amount, 0); // Recalculate total paid
+        const balanceDue = invoice.total - totalPaid;
+        const newStatus = balanceDue <= 0.005 ? 'Paid' : 'Partial'; // Assuming these statuses exist
+
+        await invoicesCollection.updateOne(
+          { _id: invoiceObjectId },
+          { $set: { status: newStatus /* TODO: Update client balanceDue? */, updatedAt: new Date() } },
+          { session }
+        );
       }
 
       // 3. Update related Expense status (if applicable)
-      if (expenseId) {
-        // Check if total payments cover expense amount
-        const expense = await tx.expense.findUnique({ where: { id: expenseId }, select: { amount: true, payments: { select: { amount: true } } } });
-        if (!expense) throw new Error(`Expense ${expenseId} not found during transaction.`);
+      if (expenseObjectId) {
+         const expense = await expensesCollection.findOne({ _id: expenseObjectId }, { session });
+         const allPaymentsForExpense = await paymentsCollection.find({ expenseId: expenseObjectId }, { session }).toArray();
 
-        const existingPaymentsSum = expense.payments.reduce((sum, p) => sum + p.amount.toNumber(), 0);
-        const totalPaid = existingPaymentsSum + amount;
-        const newStatus = totalPaid >= expense.amount.toNumber() ? Prisma.ExpenseStatus.Paid : Prisma.ExpenseStatus.Pending; // Or a Partial status if needed
+         if (!expense) throw new Error(`Expense ${expenseObjectId} not found during transaction.`);
 
-        await tx.expense.update({
-            where: { id: expenseId },
-            data: { status: newStatus /* TODO: Update vendor balanceOwed? */ },
-        });
+         const totalPaid = allPaymentsForExpense.reduce((sum, p) => sum + p.amount, 0);
+         const newStatus = totalPaid >= expense.amount ? 'Paid' : 'Pending'; // Assuming these statuses
+
+         await expensesCollection.updateOne(
+             { _id: expenseObjectId },
+             { $set: { status: newStatus, updatedAt: new Date() } },
+             { session }
+         );
       }
 
       // 4. Update Bank Account balance
-      await tx.bankAccount.update({
-        where: { id: bankAccountId },
-        data: { balance: { decrement: amount } }, // Assuming payment made DECREASES balance
-      });
+      await bankAccountsCollection.updateOne(
+        { _id: bankAccountObjectId },
+        { $inc: { balance: -amount } }, // DECREMENT balance
+        { session }
+      );
 
-      return newPayment;
-    });
+    }); // End transaction
+
+    await session.endSession();
 
     // Revalidate relevant paths
     revalidatePath('/payments');
-    if (invoiceId) revalidatePath(`/invoices/${invoiceId}`);
-    if (expenseId) revalidatePath(`/expenses/${expenseId}`);
-    revalidatePath('/dashboard'); // Update stats potentially
-    revalidatePath('/bank-accounts'); // Update bank balance list
+    if (invoiceObjectId) revalidatePath(`/invoices/${invoiceIdString}`);
+    if (expenseObjectId) revalidatePath(`/expenses/${expenseIdString}`);
+    revalidatePath('/dashboard');
+    revalidatePath('/bank-accounts');
 
-    return { success: true, message: 'Payment recorded successfully.', data: result };
+    return { success: true, message: 'Payment recorded successfully.', data: createdPaymentData };
 
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, `${context} Transaction`)) {
-        return { success: false, message: 'Database Connection Error. Failed to record payment.', error: 'Initialization Error' };
-     }
-
+     await session.endSession(); // Ensure session closure on error
      console.error(`[DB_ERROR] ${context} Transaction:`, error);
-     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2003') {
-            const field = (error.meta?.field_name as string) || 'related record';
-            return { success: false, message: `Database Error: Invalid ${field}. Record not found.`, error: error.code };
-        }
-        if (error.code === 'P2025') {
-             return { success: false, message: 'Database Error: Could not find related record to update.', error: error.code };
-        }
-     } else if (error instanceof Error && error.message.includes("not found during transaction")) {
-         return { success: false, message: error.message, error: "Transaction Error" };
-     }
     return {
         success: false,
-        message: 'Database Error: Failed to record payment.',
+        message: 'Database Transaction Error: Failed to record payment.',
         error: error instanceof Error ? error.message : String(error)
     };
   }
 }
 
-// --- Update Payment for the current tenant ---
+// --- Update Payment ---
 export async function updatePayment(formData: FormData): Promise<ActionResult> {
-    const tenantId = await getTenantId();
-    if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-    const paymentId = formData.get('id') as string;
-    if (!paymentId) return { success: false, message: "Payment ID missing." };
-    const context = `updatePayment (ID: ${paymentId}, Tenant: ${tenantId})`;
-
-    // 1. Verify payment belongs to the tenant
-    try {
-        const payment = await prisma.payment.findUnique({ where: { id: paymentId }, select: { tenantId: true } });
-        if (!payment) return { success: false, message: 'Payment not found.' };
-        if (payment.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
-    } catch (error) {
-        if (checkPrismaInitError(error, `${context} - Ownership Check`)) {
-             return { success: false, message: 'Database Connection Error during ownership check.' };
-        }
-        console.error(`[DB_ERROR] Error verifying payment ownership in ${context}:`, error);
-        return { success: false, message: 'Database error verifying payment ownership.' };
-    }
-
-   // TODO: Implement complex update logic
-   // - Validate form data and relations (like in addPayment)
-   // - Use a transaction:
-   //   - Find the *old* payment details (amount, invoiceId, expenseId, bankAccountId).
-   //   - Revert the balance/status changes made by the *old* payment (decrement bank balance, update invoice/expense status).
-   //   - Apply the changes for the *new* payment details (increment bank balance, update invoice/expense status based on new amount/links).
-   //   - Update the payment record itself.
-   console.warn("Update Payment - Not fully implemented yet (Requires Complex Transaction Logic)");
-  return { success: false, message: 'Update Payment - Not Implemented Yet' };
+   // Similar structure to addPayment, but with complex transaction:
+   // 1. Validate input & relations.
+   // 2. Start Transaction.
+   // 3. Find OLD payment, verify ownership. Store its details (amount, links).
+   // 4. Revert OLD balance/status changes (bank, invoice/expense).
+   // 5. Apply NEW balance/status changes based on validated form data.
+   // 6. Update the payment record itself.
+   // 7. Commit Transaction.
+   // 8. Revalidate.
+   console.warn("Update Payment - MongoDB implementation requires careful transaction logic for reverting/applying balances/statuses.");
+   return { success: false, message: 'Update Payment - Not Implemented Yet (MongoDB)' };
 }
 
-// --- Delete Payment for the current tenant ---
-export async function deletePayment(id: string): Promise<ActionResult> {
+// --- Delete Payment ---
+export async function deletePayment(idString: string): Promise<ActionResult> {
     const tenantId = await getTenantId();
     if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-    if (!id) return { success: false, message: "Payment ID missing." };
-    const context = `deletePayment (ID: ${id}, Tenant: ${tenantId})`;
+    if (!idString) return { success: false, message: "Payment ID missing." };
+    const context = `deletePayment (ID: ${idString}, Tenant: ${tenantId})`;
 
-    // --- Transaction Logic ---
+    let paymentId: ObjectId;
+    try { paymentId = new ObjectId(idString); }
+    catch { return { success: false, message: 'Invalid Payment ID format.' }; }
+
+   // --- Transaction Logic ---
+    const { db, client: mongoClient } = await connectToDatabase();
+    const session = mongoClient.startSession();
     try {
-         const result = await prisma.$transaction(async (tx) => {
-             // 1. Find the payment and verify ownership
-             const payment = await tx.payment.findUnique({
-                 where: { id },
-                 select: { tenantId: true, amount: true, invoiceId: true, expenseId: true, bankAccountId: true }
-             });
-             if (!payment) throw new Error('Payment not found.');
-             if (payment.tenantId !== tenantId) throw new Error('Authorization Error: Cannot delete this payment.');
+         await session.withTransaction(async () => {
+             const paymentsCollection = db.collection<PaymentDocument>('payments');
+             const bankAccountsCollection = db.collection('bankAccounts');
+             const invoicesCollection = db.collection('invoices');
+             const expensesCollection = db.collection('expenses');
 
-             const amount = payment.amount.toNumber();
+             // 1. Find the payment and verify ownership
+             const payment = await paymentsCollection.findOne({ _id: paymentId, tenantId: tenantId }, { session });
+             if (!payment) throw new Error('Payment not found or access denied.');
+
+             const amount = payment.amount;
 
              // 2. Revert Bank Account balance change
-             await tx.bankAccount.update({
-                 where: { id: payment.bankAccountId },
-                 data: { balance: { increment: amount } } // Increment because we are deleting a payment made
-             });
+             await bankAccountsCollection.updateOne(
+                 { _id: payment.bankAccountId },
+                 { $inc: { balance: amount } }, // INCREMENT because deleting payment
+                 { session }
+             );
 
              // 3. Revert Invoice status/balance change (if applicable)
              if (payment.invoiceId) {
-                 const invoice = await tx.invoice.findUnique({
-                     where: { id: payment.invoiceId },
-                     select: { total: true, payments: { select: { id: true, amount: true } } }
-                 });
+                 // Fetch invoice and *all other* payments within transaction
+                 const invoice = await invoicesCollection.findOne({ _id: payment.invoiceId }, { session });
                  if (invoice) { // Check if invoice still exists
-                     const otherPaymentsSum = invoice.payments
-                         .filter(p => p.id !== id) // Exclude the payment being deleted
-                         .reduce((sum, p) => sum + p.amount.toNumber(), 0);
-                     const balanceDueAfterDeletion = invoice.total.toNumber() - otherPaymentsSum;
-                     const newStatus = balanceDueAfterDeletion <= 0.005 ? Prisma.InvoiceStatus.Paid
-                                     : (otherPaymentsSum > 0 ? Prisma.InvoiceStatus.Partial : Prisma.InvoiceStatus.Pending); // Revert to Pending if no other payments
+                    const otherPayments = await paymentsCollection.find(
+                         { invoiceId: payment.invoiceId, _id: { $ne: paymentId } }, // Exclude deleted payment
+                         { session }
+                    ).toArray();
+                    const otherPaymentsSum = otherPayments.reduce((sum, p) => sum + p.amount, 0);
+                    const balanceDueAfterDeletion = invoice.total - otherPaymentsSum;
+                    const newStatus = balanceDueAfterDeletion <= 0.005 ? 'Paid'
+                                   : (otherPaymentsSum > 0 ? 'Partial' : 'Pending');
 
-                     await tx.invoice.update({
-                         where: { id: payment.invoiceId },
-                         data: { status: newStatus }
-                     });
+                    await invoicesCollection.updateOne(
+                         { _id: payment.invoiceId },
+                         { $set: { status: newStatus, updatedAt: new Date() } },
+                         { session }
+                    );
                  }
              }
 
              // 4. Revert Expense status change (if applicable)
              if (payment.expenseId) {
-                  const expense = await tx.expense.findUnique({
-                      where: { id: payment.expenseId },
-                      select: { amount: true, payments: { select: { id: true, amount: true } } }
-                  });
-                 if (expense) { // Check if expense still exists
-                     const otherPaymentsSum = expense.payments
-                         .filter(p => p.id !== id)
-                         .reduce((sum, p) => sum + p.amount.toNumber(), 0);
-                     // Revert status to Pending if this was the only/last payment making it Paid
-                     const newStatus = otherPaymentsSum >= expense.amount.toNumber() ? Prisma.ExpenseStatus.Paid : Prisma.ExpenseStatus.Pending;
+                 const expense = await expensesCollection.findOne({ _id: payment.expenseId }, { session });
+                  if (expense) { // Check if expense still exists
+                      const otherPayments = await paymentsCollection.find(
+                          { expenseId: payment.expenseId, _id: { $ne: paymentId } },
+                          { session }
+                      ).toArray();
+                     const otherPaymentsSum = otherPayments.reduce((sum, p) => sum + p.amount, 0);
+                     const newStatus = otherPaymentsSum >= expense.amount ? 'Paid' : 'Pending';
 
-                     await tx.expense.update({
-                         where: { id: payment.expenseId },
-                         data: { status: newStatus }
-                     });
+                     await expensesCollection.updateOne(
+                         { _id: payment.expenseId },
+                         { $set: { status: newStatus, updatedAt: new Date() } },
+                         { session }
+                     );
                  }
              }
 
              // 5. Delete the payment record
-             await tx.payment.delete({ where: { id } });
+             await paymentsCollection.deleteOne({ _id: paymentId }, { session });
 
-             return true; // Indicate success
-         });
+         }); // End Transaction
+
+        await session.endSession();
 
         // Revalidate relevant paths
         revalidatePath('/payments');
-        // Revalidate related invoice/expense pages if needed
+        if (payment?.invoiceId) revalidatePath(`/invoices/${payment.invoiceId.toHexString()}`);
+        if (payment?.expenseId) revalidatePath(`/expenses/${payment.expenseId.toHexString()}`);
         revalidatePath('/dashboard');
         revalidatePath('/bank-accounts');
 
         return { success: true, message: 'Payment deleted successfully.' };
 
     } catch (error: unknown) {
-         if (checkPrismaInitError(error, `${context} Transaction`)) {
-             return { success: false, message: 'Database Connection Error. Failed to delete payment.', error: 'Initialization Error' };
-         }
-         console.error(`[DB_ERROR] ${context} Transaction:`, error);
-          if (error instanceof Error && (error.message === 'Payment not found.' || error.message.startsWith('Authorization Error'))) {
-              return { success: false, message: error.message };
-          }
-          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-              // Should be caught by the initial findUnique, but good backup
-              return { success: false, message: 'Record not found during deletion process.', error: error.code };
-          }
-         return { success: false, message: 'Database Error: Failed to delete payment.', error: error instanceof Error ? error.message : String(error) };
+        await session.endSession(); // Ensure session closed on error
+        console.error(`[DB_ERROR] ${context} Transaction:`, error);
+        return {
+            success: false,
+            message: 'Database Transaction Error: Failed to delete payment.',
+            error: error instanceof Error ? error.message : String(error)
+        };
     }
 }

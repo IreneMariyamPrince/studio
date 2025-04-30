@@ -1,8 +1,7 @@
 
 'use server';
 
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { connectToDatabase, closeDatabaseConnection } from '@/lib/mongodb';
 
 // Type definition for action result
 type DbStatusResult = {
@@ -10,47 +9,33 @@ type DbStatusResult = {
     error?: string | null;
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
 /**
- * Checks the database connection by attempting a simple query.
- * Catches PrismaClientInitializationError specifically.
+ * Checks the MongoDB connection status using the driver's ping command.
  * @returns {Promise<DbStatusResult>} - Object indicating connection status.
  */
 export async function checkDbConnection(): Promise<DbStatusResult> {
+  let client;
   try {
-    // Attempt a very lightweight query to check connectivity.
-    await prisma.$queryRaw`SELECT 1`;
+    const { db } = await connectToDatabase();
+    // The ping command is cheap and does not require auth.
+    await db.command({ ping: 1 });
+    // console.log("MongoDB connection check successful (ping).");
     return { connected: true, error: null };
   } catch (error: unknown) {
-    let errorMessage: string | null = 'Unknown database error occurred.';
-    let logMessage: string = 'Unknown error type';
-
-    if (error instanceof Prisma.PrismaClientInitializationError) {
-      logMessage = `Prisma Initialization Error: ${error.message}. Code: ${error.errorCode}`;
-       // Provide more specific user-facing hint if it's the libssl issue
-       if (error.message.includes('libssl')) {
-            errorMessage = "Connection failed: Missing required system libraries (e.g., libssl). Check server environment and Prisma documentation.";
-             if (!libsslErrorLogged) {
-                 console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-                 libsslErrorLogged = true; // Prevent repeated logging
-             }
-       } else {
-            errorMessage = "Connection failed: Could not initialize database connection. Check connection string and database server status.";
-            console.error(`[DB_HEALTH_CHECK_ERROR] Prisma Initialization Error: ${error.message}`); // Log other init errors
-       }
-    } else if (error instanceof Error) {
-      logMessage = `Generic Error: ${error.message}`;
-      errorMessage = "Connection failed: An unexpected error occurred while connecting to the database.";
-       console.error(`[DB_HEALTH_CHECK_ERROR] ${logMessage}`); // Log detailed error server-side
-    } else {
-      logMessage = `Unknown error type: ${String(error)}`;
-      errorMessage = "Connection failed due to an unknown error.";
-       console.error(`[DB_HEALTH_CHECK_ERROR] ${logMessage}`); // Log detailed error server-side
+    console.error("[DB_HEALTH_CHECK_ERROR] MongoDB connection failed:", error);
+    let errorMessage = "Connection failed: Could not connect to the database.";
+    if (error instanceof Error) {
+        if (error.message.includes('Authentication failed')) {
+            errorMessage = "Connection failed: Authentication error. Check credentials.";
+        } else if (error.message.includes('querySrv ENOTFOUND') || error.message.includes('queryTxt ENOTFOUND')) {
+            errorMessage = "Connection failed: DNS resolution error. Check connection string or network.";
+        } else {
+             errorMessage = `Connection failed: ${error.message}`;
+        }
     }
-
-    return { connected: false, error: errorMessage }; // Return user-friendly message
+    // No need to explicitly close connection here as connectToDatabase handles errors
+    return { connected: false, error: errorMessage };
   }
-  // No finally block needed as Prisma manages connections in the pool.
+  // Note: We don't explicitly close the connection here to allow reuse.
+  // A separate mechanism might be needed for graceful shutdown if required.
 }

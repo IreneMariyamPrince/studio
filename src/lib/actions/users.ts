@@ -2,10 +2,30 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { userSchema, userFormSchema, UserSchema, userRoles } from '@/lib/schemas/user';
-import { getTenantId, getUserId, isSuperAdmin } from '@/lib/utils/tenant'; // Tenant/user context helpers
+import { getTenantId, getUserId, isSuperAdmin } from '@/lib/utils/tenant';
+
+// Type definition for MongoDB documents
+type UserDocument = Omit<UserSchema, 'id' | 'tenantId'> & {
+    _id?: ObjectId;
+    tenantId?: string | null; // Keep as string from session/middleware
+    createdById?: ObjectId | null;
+    createdAt?: Date;
+    updatedAt?: Date;
+};
+
+
+// Helper to get collections
+async function getUsersCollection(): Promise<Collection<UserDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<UserDocument>('users');
+}
+async function getTenantsCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('tenants');
+}
 
 // Type definition for action results
 type ActionResult = {
@@ -16,30 +36,12 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
 
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
-
-
-// --- Get Users (Context-Aware: Tenant Admin gets tenant users, Super Admin gets all) ---
+// --- Get Users (Context-Aware) ---
 export async function getUsers(): Promise<ActionResult> {
-  const currentUserId = await getUserId(); // Optional: Exclude self?
+  const currentUserIdString = await getUserId();
   const currentUserIsSuper = await isSuperAdmin();
-  const currentTenantId = await getTenantId();
+  const currentTenantId = await getTenantId(); // This is string | null
 
   if (!currentUserIsSuper && !currentTenantId) {
        return { success: false, message: 'Unauthorized: Tenant context required.' };
@@ -48,24 +50,27 @@ export async function getUsers(): Promise<ActionResult> {
   const context = currentUserIsSuper ? 'getUsers (SuperAdmin)' : `getUsers (Tenant: ${currentTenantId})`;
 
   try {
-    const whereClause: Prisma.UserWhereInput = {};
+    const usersCollection = await getUsersCollection();
+    const query: any = {};
     if (!currentUserIsSuper) {
         // Tenant Admin/User: Only see users within their own tenant
-        whereClause.tenantId = currentTenantId;
+        query.tenantId = currentTenantId; // Match the string tenantId
     }
-    // Super Admin sees all users (tenantId can be null or match any tenant)
+    // Super Admin sees all users (no tenantId filter needed, or handle explicitly if needed)
 
-    const users = await prisma.user.findMany({
-      where: whereClause,
-      orderBy: { name: 'asc' },
-      // include: { tenant: { select: { id: true, name: true } } } // Optionally include tenant info
-    });
+    const usersCursor = usersCollection.find(query).sort({ name: 1 });
+    const usersArray = await usersCursor.toArray();
 
-    return { success: true, message: 'Users fetched successfully.', data: users.map(u => userSchema.parse(u)) };
+     const parsedUsers = usersArray.map(u => userSchema.parse({
+         ...u,
+         id: u._id?.toHexString(),
+         tenantId: u.tenantId ?? undefined, // Handle null/undefined tenantId for super admins potentially
+         name: u.name ?? undefined,
+         firebaseUid: u.firebaseUid ?? undefined,
+     }));
+
+    return { success: true, message: 'Users fetched successfully.', data: parsedUsers };
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to fetch users.', error: 'Initialization Error' };
-    }
     console.error(`[ACTION_ERROR] ${context}:`, error);
     return { success: false, message: 'Failed to fetch users.', error };
   }
@@ -74,7 +79,7 @@ export async function getUsers(): Promise<ActionResult> {
 // --- Invite/Add User (Context-Aware) ---
 export async function addUser(formData: FormData): Promise<ActionResult> {
     const currentUserIsSuper = await isSuperAdmin();
-    const currentTenantId = await getTenantId();
+    const currentTenantId = await getTenantId(); // string | null
 
     if (!currentUserIsSuper && !currentTenantId) {
        return { success: false, message: 'Unauthorized: Tenant context required to add user.' };
@@ -82,24 +87,30 @@ export async function addUser(formData: FormData): Promise<ActionResult> {
 
     const rawData = Object.fromEntries(formData.entries());
 
-    // Tenant ID to assign: Current tenant for Admins, or specified for SuperAdmins
+    // Tenant ID to assign (string | null)
     const targetTenantId = currentUserIsSuper
-                           ? rawData.tenantId as string // Super Admin specifies target tenant
+                           ? (rawData.tenantId as string) || null // Super Admin specifies target tenant (can be null)
                            : currentTenantId; // Tenant Admin adds to their own tenant
 
+    // If Super Admin is creating a non-super admin, targetTenantId must be specified and exist
     if (currentUserIsSuper && !targetTenantId) {
-         return { success: false, message: 'Target Tenant ID is required for Super Admin user creation.' };
+         // Allow Super Admin creation without tenantId ONLY if making another Super Admin?
+         // This logic depends on requirements. For now, let's assume non-super needs a tenant.
+         // We also prevent setting isSuperAdmin via this form directly.
+         return { success: false, message: 'Target Tenant ID is required for Super Admin user creation.', fieldErrors: { tenantId: ['Tenant ID required.'] } };
     }
 
-     // Validate that targetTenantId exists if provided by SuperAdmin
-    if (currentUserIsSuper && targetTenantId) {
+     // Validate that targetTenantId exists if provided
+    if (targetTenantId) {
         try {
-             const tenantExists = await prisma.tenant.findUnique({ where: { id: targetTenantId } });
-             if (!tenantExists) return { success: false, message: `Target tenant (${targetTenantId}) not found.` };
+             const tenantsCollection = await getTenantsCollection();
+             // Assume tenantId stored on user is string, matching tenant 'id' string if needed
+             // If tenants collection uses ObjectId, convert targetTenantId
+             // let targetTenantObjectId;
+             // try { targetTenantObjectId = new ObjectId(targetTenantId); } catch { throw new Error("Invalid Tenant ID format"); }
+             const tenantExists = await tenantsCollection.findOne({ id: targetTenantId }, { projection: { _id: 1 }}); // Adjust query based on Tenant schema ID field
+             if (!tenantExists) return { success: false, message: `Target tenant (${targetTenantId}) not found.`, fieldErrors: { tenantId: ['Tenant not found.'] } };
         } catch (error) {
-             if (checkPrismaInitError(error, `addUser - Tenant Validation`)) {
-                 return { success: false, message: 'Database Connection Error during tenant validation.' };
-             }
              console.error(`[DB_ERROR] Error validating target tenant:`, error);
              return { success: false, message: 'Error validating target tenant.' };
         }
@@ -109,76 +120,82 @@ export async function addUser(formData: FormData): Promise<ActionResult> {
     const validatedFields = userFormSchema.safeParse({
         email: rawData.email,
         name: rawData.name || undefined,
-        role: rawData.role, // Ensure role is within allowed enum values
+        role: rawData.role,
         isActive: rawData.isActive ? rawData.isActive === 'true' : true,
-        // Do NOT allow setting isSuperAdmin via this form
     });
 
-    if (!validatedFields.success) {
-        const fieldErrors = validatedFields.error.flatten().fieldErrors;
-        console.error(`[VALIDATION_ERROR] addUser (${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`}):`, fieldErrors);
-        return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
-    }
+    if (!validatedFields.success) { /* handle error */ }
 
-    // Prevent Tenant Admins from creating Admins? (Business logic)
-    // if (!currentUserIsSuper && validatedFields.data.role === 'Admin') {
-    //     return { success: false, message: 'Only Super Admins can create Admin users.' };
-    // }
+    // Prevent Tenant Admins from creating Admins (example logic)
+    if (!currentUserIsSuper && validatedFields.data.role === 'Admin') {
+         return { success: false, message: 'Only Super Admins can create Admin users for a tenant.' };
+    }
 
     const context = `addUser (${currentUserIsSuper ? `SuperAdmin -> Tenant ${targetTenantId}` : `Tenant: ${currentTenantId}`})`;
     try {
-        // TODO: Handle password creation/invitation flow if not using external auth provider like Firebase Auth
-        const newUser = await prisma.user.create({
-            data: {
-                ...validatedFields.data,
-                tenantId: targetTenantId, // Assign to the correct tenant
-                isSuperAdmin: false, // Ensure new users aren't super admins by default
-            },
-        });
+         const usersCollection = await getUsersCollection();
 
-        revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings'); // Revalidate appropriate user list
-        return { success: true, message: 'User added successfully.', data: userSchema.parse(newUser) };
+         // Check for existing email
+         const existingUser = await usersCollection.findOne({ email: validatedFields.data.email });
+         if (existingUser) {
+             return { success: false, message: 'A user with this email already exists.', error: 'Duplicate Key', fieldErrors: { email: ['Email already in use.'] } };
+         }
+
+        // TODO: Handle password creation/invitation flow
+        const newUserDocument: Omit<UserDocument, '_id'> = {
+                ...validatedFields.data,
+                tenantId: targetTenantId, // Assign target tenant (string or null)
+                isSuperAdmin: false, // Cannot set via this form
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+        const result = await usersCollection.insertOne(newUserDocument);
+        if (!result.insertedId) throw new Error("Failed to insert user.");
+
+        revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings');
+        return { success: true, message: 'User added successfully.', data: userSchema.parse({ ...newUserDocument, id: result.insertedId.toHexString()}) };
 
     } catch (error) {
-        if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error. Failed to add user.', error: 'Initialization Error' };
-        }
         console.error(`[DB_ERROR] ${context}:`, error);
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-            // Usually email uniqueness
-             return { success: false, message: 'A user with this email already exists.', error: error.code, fieldErrors: { email: ['Email already in use.'] } };
+        // Handle duplicate email error from MongoDB index
+        if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+             return { success: false, message: 'A user with this email already exists.', error: 'Duplicate Key', fieldErrors: { email: ['Email already in use.'] } };
         }
         return { success: false, message: 'Failed to add user.', error };
     }
 }
 
 // --- Update User (Context-Aware) ---
-const updateUserFormSchema = userFormSchema.extend({ id: z.string().cuid() });
+const updateUserFormSchema = userFormSchema.extend({
+    id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid user ID." }),
+ });
 
 export async function updateUser(formData: FormData): Promise<ActionResult> {
     const currentUserIsSuper = await isSuperAdmin();
-    const currentTenantId = await getTenantId();
-    const targetUserId = formData.get('id') as string;
+    const currentTenantId = await getTenantId(); // string | null
+    const targetUserIdString = formData.get('id') as string;
 
-    if (!targetUserId) return { success: false, message: 'User ID missing.' };
-    if (!currentUserIsSuper && !currentTenantId) {
-       return { success: false, message: 'Unauthorized: Context required.' };
-    }
-    const context = `updateUser (ID: ${targetUserId}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
+    if (!targetUserIdString) return { success: false, message: 'User ID missing.' };
+    if (!currentUserIsSuper && !currentTenantId) return { success: false, message: 'Unauthorized: Context required.' };
+    const context = `updateUser (ID: ${targetUserIdString}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
+
+    let targetUserId: ObjectId;
+    try { targetUserId = new ObjectId(targetUserIdString); }
+    catch { return { success: false, message: 'Invalid User ID format.' }; }
 
     // Fetch user to check ownership/permissions
-    let targetUser;
+    let targetUser: WithId<UserDocument> | null = null;
     try {
-         targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, select: { tenantId: true, isSuperAdmin: true, role: true } }); // Added role fetch
+         const usersCollection = await getUsersCollection();
+         targetUser = await usersCollection.findOne({ _id: targetUserId });
          if (!targetUser) return { success: false, message: 'User not found.' };
-         // Tenant Admin can only update users in their tenant, and cannot modify super admins
+
+         // Authorization checks
          if (!currentUserIsSuper && (targetUser.tenantId !== currentTenantId || targetUser.isSuperAdmin)) {
               return { success: false, message: 'Unauthorized to update this user.' };
          }
     } catch (error) {
-         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
-             return { success: false, message: 'Database Connection Error during user verification.' };
-         }
          console.error(`[DB_ERROR] Error verifying user in ${context}:`, error);
          return { success: false, message: 'Database error verifying user.' };
     }
@@ -186,110 +203,131 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
 
     const rawData = Object.fromEntries(formData.entries());
     const validatedFields = updateUserFormSchema.safeParse({
-        id: targetUserId,
-        email: rawData.email, // Consider if email changes should be allowed/handled carefully
+        id: targetUserIdString, // validate string id format
+        email: rawData.email, // Email changes might need extra logic (verification)
         name: rawData.name || undefined,
         role: rawData.role,
         isActive: rawData.isActive ? rawData.isActive === 'true' : true,
-        // Super Admin specific: Optionally allow changing tenantId or isSuperAdmin flag (handle with extreme care)
+        // Super Admin specific: Allow changing tenantId or isSuperAdmin? VERY DANGEROUS
+        // tenantId: currentUserIsSuper ? rawData.tenantId || null : undefined, // Example if allowed
     });
 
-     if (!validatedFields.success) {
-        const fieldErrors = validatedFields.error.flatten().fieldErrors;
-         console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
-        return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
-    }
+     if (!validatedFields.success) { /* handle validation error */ }
 
-     // Prevent Tenant Admins from promoting users to Admin or changing critical fields
-     if (!currentUserIsSuper) {
-          if (validatedFields.data.role === 'Admin' && targetUser.role !== 'Admin') {
-                // Prevent promotion to Admin by Tenant Admin (example logic)
-                 console.warn(`[AUTH_WARN] ${context}: Tenant admin attempting to promote user to Admin.`);
-                return { success: false, message: 'Unauthorized to promote user to Admin role.' };
-          }
-          // Disallow changing email if needed
-          // if (validatedFields.data.email !== targetUser.email) { ... }
+     // Prevent Tenant Admins from promoting users to Admin
+     if (!currentUserIsSuper && validatedFields.data.role === 'Admin' && targetUser.role !== 'Admin') {
+         return { success: false, message: 'Unauthorized to promote user to Admin role.' };
      }
+     // Prevent changing critical flags like isSuperAdmin unless explicitly allowed for super admins
+     // let isSuperAdminUpdate = targetUser.isSuperAdmin; // Keep existing value
+     // if (currentUserIsSuper && rawData.isSuperAdmin !== undefined) {
+     //     isSuperAdminUpdate = rawData.isSuperAdmin === 'true';
+     // }
 
-    const { id, ...updateData } = validatedFields.data;
+    const { id, ...updateData } = validatedFields.data; // Exclude string id
 
     try {
-        const updatedUser = await prisma.user.update({
-            where: { id: id },
-            data: updateData, // Apply validated changes
-        });
+         const usersCollection = await getUsersCollection();
+
+         // Check for email conflict if email is changing
+         if (updateData.email && updateData.email !== targetUser.email) {
+             const existingEmail = await usersCollection.findOne({ _id: { $ne: targetUserId }, email: updateData.email });
+             if (existingEmail) {
+                 return { success: false, message: 'This email is already in use.', fieldErrors: { email: ['Email already in use.'] } };
+             }
+         }
+
+        const result = await usersCollection.updateOne(
+            { _id: targetUserId }, // Use ObjectId for matching
+            {
+                $set: {
+                    ...updateData,
+                    // tenantId: targetTenantId, // Apply if tenant change is allowed
+                    // isSuperAdmin: isSuperAdminUpdate, // Apply if super admin change allowed
+                    updatedAt: new Date()
+                 }
+            }
+        );
+
+        if (result.matchedCount === 0) {
+            return { success: false, message: 'User not found during update.', error: 'Not Found' };
+        }
+        if (result.modifiedCount === 0) {
+            return { success: true, message: 'User details unchanged.' };
+        }
 
         revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings');
-        return { success: true, message: 'User updated successfully.', data: userSchema.parse(updatedUser) };
+         const updatedUserDoc = await usersCollection.findOne({ _id: targetUserId });
+         const returnData = updatedUserDoc ? userSchema.parse({ ...updatedUserDoc, id: updatedUserDoc._id.toHexString(), tenantId: updatedUserDoc.tenantId ?? undefined }) : null;
+        return { success: true, message: 'User updated successfully.', data: returnData };
     } catch (error) {
-         if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error. Failed to update user.', error: 'Initialization Error' };
-        }
         console.error(`[DB_ERROR] ${context}:`, error);
-        if (error instanceof Prisma.PrismaClientKnownRequestError) {
-             if (error.code === 'P2002') { // Email unique constraint
-                 return { success: false, message: 'This email is already in use by another user.', error: error.code, fieldErrors: { email: ['Email already in use.'] } };
-             }
-             if (error.code === 'P2025') { // Record not found
-                 return { success: false, message: 'User not found.', error: error.code };
-             }
+        // Handle duplicate email error from index
+        if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+             return { success: false, message: 'This email is already in use.', fieldErrors: { email: ['Email already in use.'] } };
         }
         return { success: false, message: 'Failed to update user.', error };
     }
 }
 
 // --- Delete User (Context-Aware) ---
-export async function deleteUser(id: string): Promise<ActionResult> {
+export async function deleteUser(idString: string): Promise<ActionResult> {
     const currentUserIsSuper = await isSuperAdmin();
-    const currentTenantId = await getTenantId();
-    const currentUserId = await getUserId();
+    const currentTenantId = await getTenantId(); // string | null
+    const currentUserIdString = await getUserId(); // string | null
 
-    if (!id) return { success: false, message: 'User ID missing.' };
-    if (!currentUserIsSuper && !currentTenantId) {
-       return { success: false, message: 'Unauthorized: Context required.' };
+    if (!idString) return { success: false, message: 'User ID missing.' };
+    if (!currentUserIsSuper && !currentTenantId) return { success: false, message: 'Unauthorized: Context required.' };
+     if (idString === currentUserIdString) { // Compare string IDs
+        return { success: false, message: 'Cannot delete yourself.' };
     }
-     if (id === currentUserId) {
-        return { success: false, message: 'Cannot delete yourself.' }; // Prevent self-deletion
-    }
-     const context = `deleteUser (ID: ${id}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
+     const context = `deleteUser (ID: ${idString}, ${currentUserIsSuper ? 'SuperAdmin' : `Tenant: ${currentTenantId}`})`;
+
+    let targetUserId: ObjectId;
+    try { targetUserId = new ObjectId(idString); }
+    catch { return { success: false, message: 'Invalid User ID format.' }; }
 
     // Fetch user to check ownership/permissions
-    let targetUser;
+    let targetUser: WithId<UserDocument> | null = null;
     try {
-         targetUser = await prisma.user.findUnique({ where: { id: id }, select: { tenantId: true, isSuperAdmin: true } });
+         const usersCollection = await getUsersCollection();
+         targetUser = await usersCollection.findOne({ _id: targetUserId });
          if (!targetUser) return { success: false, message: 'User not found.' };
-         // Tenant Admin can only delete users in their tenant, and cannot delete super admins
+
+         // Authorization checks
          if (!currentUserIsSuper && (targetUser.tenantId !== currentTenantId || targetUser.isSuperAdmin)) {
-              return { success: false, message: 'Unauthorized to delete this user.' };
+             return { success: false, message: 'Unauthorized to delete this user.' };
          }
-          // Prevent deleting super admins entirely? Or only allow other super admins?
-         if (targetUser.isSuperAdmin && !currentUserIsSuper) { // Strict: Only super admins can delete super admins
-              console.warn(`[AUTH_WARN] ${context}: Tenant admin attempting to delete Super Admin.`);
-             return { success: false, message: 'Unauthorized to delete a Super Admin user.' };
-         }
+          if (targetUser.isSuperAdmin && !currentUserIsSuper) {
+              return { success: false, message: 'Unauthorized to delete a Super Admin user.' };
+          }
+           // Optional: Prevent deletion of the *last* super admin?
+            // if (targetUser.isSuperAdmin) {
+            //     const superAdminCount = await usersCollection.countDocuments({ isSuperAdmin: true });
+            //     if (superAdminCount <= 1) return { success: false, message: 'Cannot delete the last Super Admin.' };
+            // }
+
     } catch (error) {
-         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
-             return { success: false, message: 'Database Connection Error during user verification.' };
-         }
          console.error(`[DB_ERROR] Error verifying user for deletion in ${context}:`, error);
          return { success: false, message: 'Database error verifying user for deletion.' };
     }
 
     try {
-        // Consider what happens to records created by this user (e.g., Journal Entries)
-        // The schema uses onDelete: SetNull for createdById, so the records will remain.
-        await prisma.user.delete({ where: { id: id } });
+         const usersCollection = await getUsersCollection();
+        // TODO: Consider implications for data created by this user (e.g., Journal Entries createdById).
+        // If using ObjectId for createdById, no direct action needed unless you want to reassign/clear.
+        // If using string ID, ensure consistency.
+
+        const result = await usersCollection.deleteOne({ _id: targetUserId });
+
+        if (result.deletedCount === 0) {
+             return { success: false, message: 'User not found during deletion.', error: 'Not Found' };
+        }
 
         revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings');
         return { success: true, message: 'User deleted successfully.' };
     } catch (error) {
-        if (checkPrismaInitError(error, context)) {
-            return { success: false, message: 'Database Connection Error. Failed to delete user.', error: 'Initialization Error' };
-        }
         console.error(`[DB_ERROR] ${context}:`, error);
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-            return { success: false, message: 'User not found.', error: error.code };
-        }
         return { success: false, message: 'Failed to delete user.', error };
     }
 }

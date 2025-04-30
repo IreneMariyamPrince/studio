@@ -2,10 +2,19 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { companySettingSchema, companySettingFormSchema, CompanySettingSchema } from '@/lib/schemas/companySetting';
-import { getTenantId, isSuperAdmin } from '@/lib/utils/tenant'; // Helper to get tenant ID and check admin status
+import { getTenantId, isSuperAdmin } from '@/lib/utils/tenant';
+
+// Type definition for MongoDB documents
+type CompanySettingDocument = Omit<CompanySettingSchema, 'id'> & { _id?: ObjectId; tenantId: string; createdAt?: Date; updatedAt?: Date };
+
+// Helper to get the collection
+async function getCompanySettingsCollection(): Promise<Collection<CompanySettingDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<CompanySettingDocument>('companySettings');
+}
 
 // Type definition for action results
 type ActionResult = {
@@ -16,60 +25,38 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
 
 // --- Get Company Settings for the current tenant ---
 export async function getCompanySettings(): Promise<CompanySettingSchema | null> {
   const tenantId = await getTenantId();
   if (!tenantId) {
     console.error("[ACTION_ERROR] Tenant ID not found in getCompanySettings.");
-    return null; // Return null if no tenant context
+    return null;
   }
 
   const context = `getCompanySettings (Tenant: ${tenantId})`;
   try {
-    const settings = await prisma.companySetting.findUnique({
-      where: { tenantId: tenantId },
-    });
+    const settingsCollection = await getCompanySettingsCollection();
+    const settingsDoc = await settingsCollection.findOne({ tenantId: tenantId });
 
-    if (!settings) {
-      // Optional: Create default settings if they don't exist?
-      // Or just return null.
-      return null;
+    if (!settingsDoc) {
+       // Optionally: Create default settings if they don't exist?
+        console.log(`No company settings found for tenant ${tenantId}. Returning null.`);
+       return null;
     }
 
-    // Validate fetched data
+    // Validate and map fetched data
     return companySettingSchema.parse({
-        ...settings,
-        // Ensure optional fields are handled correctly if needed
-        companyName: settings.companyName ?? undefined,
-        logoUrl: settings.logoUrl ?? undefined,
-        address: settings.address ?? undefined,
+        ...settingsDoc,
+        id: settingsDoc._id?.toHexString(),
+        companyName: settingsDoc.companyName ?? undefined,
+        logoUrl: settingsDoc.logoUrl ?? undefined,
+        address: settingsDoc.address ?? undefined,
     });
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        console.warn(`[DB_WARN] Database connection failed while fetching company settings for tenant ${tenantId}. Returning null.`);
-    } else {
-        console.error(`[ACTION_ERROR] Error fetching company settings for tenant ${tenantId}:`, error);
-         console.warn(`[DB_WARN] Returning null for company settings for tenant ${tenantId} due to unexpected error.`);
-    }
-    return null; // Return null on any error
+    console.error(`[ACTION_ERROR] ${context}:`, error);
+    console.warn(`[DB_WARN] Returning null for company settings for tenant ${tenantId} due to unexpected error.`);
+    return null;
   }
 }
 
@@ -81,15 +68,14 @@ export async function updateCompanySettings(formData: FormData): Promise<ActionR
   }
   const context = `updateCompanySettings (Tenant: ${tenantId})`;
 
-  // Authorization check (optional, middleware might handle this)
-  // const isAdmin = await isTenantAdmin(); // Implement a function to check if user is admin of tenantId
-  // if (!isAdmin) return { success: false, message: 'Unauthorized.' };
+  // Authorization check (ensure user is Admin/Owner for this tenant)
+  // Example: const userRole = await getUserRole(); if (userRole !== 'Admin') return { ... };
 
   const rawData = Object.fromEntries(formData.entries());
 
   const validatedFields = companySettingFormSchema.safeParse({
     companyName: rawData.companyName || undefined,
-    logoUrl: rawData.logoUrl || undefined, // Add validation if file upload is handled separately
+    logoUrl: rawData.logoUrl || undefined,
     address: rawData.address || undefined,
     // Parse other fields...
   });
@@ -101,22 +87,42 @@ export async function updateCompanySettings(formData: FormData): Promise<ActionR
   }
 
   try {
-    // Use upsert to create settings if they don't exist, or update if they do
-    const updatedSettings = await prisma.companySetting.upsert({
-      where: { tenantId: tenantId },
-      update: validatedFields.data,
-      create: {
-        tenantId: tenantId,
-        ...validatedFields.data,
-      },
-    });
+    const settingsCollection = await getCompanySettingsCollection();
+
+    const updateData = { ...validatedFields.data, updatedAt: new Date() };
+
+    // Use upsert: update if exists, insert if not
+    const result = await settingsCollection.updateOne(
+        { tenantId: tenantId }, // Filter
+        {
+            $set: updateData,
+            $setOnInsert: { tenantId: tenantId, createdAt: new Date() } // Set these only on insert
+        },
+        { upsert: true } // Enable upsert
+    );
+
+    if (!result.acknowledged) {
+        throw new Error("Database operation not acknowledged.");
+    }
+    if (result.upsertedId) {
+        console.log(`Created new company settings for tenant ${tenantId}`);
+    } else if (result.matchedCount === 0) {
+        // Should not happen with upsert unless there's a race condition or other issue
+        console.warn(`Company settings update matched 0 documents for tenant ${tenantId}, but upsert was true.`);
+    }
+
+    // Fetch the updated/created document to return it
+     const updatedDoc = await settingsCollection.findOne({ tenantId: tenantId });
+     const returnData = updatedDoc ? companySettingSchema.parse({
+         ...updatedDoc,
+         id: updatedDoc._id.toHexString(),
+         // ensure optional fields are handled
+     }) : null;
+
 
     revalidatePath('/settings'); // Revalidate settings page
-    return { success: true, message: 'Company settings updated successfully.', data: companySettingSchema.parse(updatedSettings) };
+    return { success: true, message: 'Company settings updated successfully.', data: returnData };
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to update settings.', error: 'Initialization Error' };
-    }
     console.error(`[DB_ERROR] ${context}:`, error);
     return {
         success: false,

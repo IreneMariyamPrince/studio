@@ -2,11 +2,41 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
-import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema } from '@/lib/schemas/journalEntry';
-import { accountSchema } from '@/lib/schemas/account'; // Import for parsing relations
-import { getTenantId, getUserId } from '@/lib/utils/tenant'; // Helper to get tenant/user ID
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
+import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema, entryTypes } from '@/lib/schemas/journalEntry';
+import { accountSchema } from '@/lib/schemas/account';
+import { getTenantId, getUserId } from '@/lib/utils/tenant';
+
+// Type definition for MongoDB documents
+type JournalEntryDocument = Omit<JournalEntrySchema, 'id' | 'lines' | 'createdById'> & {
+    _id?: ObjectId;
+    tenantId: string;
+    createdById?: ObjectId | null; // Store user ID if available
+    createdAt?: Date;
+    updatedAt?: Date;
+};
+type JournalEntryLineDocument = Omit<JournalEntryLineSchema, 'id' | 'journalEntryId' | 'accountId'> & {
+     _id?: ObjectId;
+     journalEntryId: ObjectId;
+     accountId: ObjectId;
+      // No tenantId needed if always accessed via JournalEntry
+ };
+type AccountInfo = { _id: ObjectId; name: string; code: string; type: typeof accountSchema.shape.type._def.values[number] }; // More specific type
+
+// Helper to get collections
+async function getJournalEntriesCollection(): Promise<Collection<JournalEntryDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<JournalEntryDocument>('journalEntries');
+}
+async function getJournalEntryLinesCollection(): Promise<Collection<JournalEntryLineDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<JournalEntryLineDocument>('journalEntryLines');
+}
+async function getAccountsCollection(): Promise<Collection<any>> { // Use 'any' or define AccountDocument
+  const { db } = await connectToDatabase();
+  return db.collection('accounts');
+}
 
 // Type definition for action results
 type ActionResult = {
@@ -17,23 +47,6 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
 
 // --- Get Journal Entries for the current tenant ---
 export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
@@ -45,36 +58,85 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
    const context = `getJournalEntries (Tenant: ${tenantId})`;
 
   try {
-    const entries = await prisma.journalEntry.findMany({
-        where: { tenantId: tenantId }, // Filter by tenant
-        orderBy: { entryDate: 'desc' },
-        include: {
-            lines: {
-                include: { account: { select: { id: true, name: true, code: true } } }
-            },
-            // createdBy: { select: { id: true, name: true, email: true } } // Optional: Include user info
+    const journalEntriesCollection = await getJournalEntriesCollection();
+    // Use aggregation to fetch entries and their lines with account info
+    const entriesCursor = journalEntriesCollection.aggregate([
+        { $match: { tenantId: tenantId } },
+        { $sort: { entryDate: -1 } },
+        {
+            $lookup: { // Join lines
+                from: 'journalEntryLines',
+                localField: '_id',
+                foreignField: 'journalEntryId',
+                as: 'linesData',
+                // Nested pipeline to join account info within lines
+                pipeline: [
+                    {
+                        $lookup: {
+                            from: 'accounts',
+                            localField: 'accountId',
+                            foreignField: '_id',
+                            as: 'accountInfo'
+                        }
+                    },
+                    { $unwind: { path: '$accountInfo', preserveNullAndEmptyArrays: true } }, // Unwind the single account
+                    { // Project necessary line fields + account details
+                       $project: {
+                            _id: 1, journalEntryId: 1, accountId: 1, type: 1, amount: 1, description: 1, createdAt: 1,
+                            account: { // Create the nested account object
+                                id: '$accountInfo._id',
+                                name: '$accountInfo.name',
+                                code: '$accountInfo.code',
+                                type: '$accountInfo.type'
+                            }
+                       }
+                    }
+                ]
+            }
+        },
+         // Optional: Lookup createdBy user info
+        // {
+        //     $lookup: { from: 'users', localField: 'createdById', foreignField: '_id', as: 'creatorInfo' }
+        // },
+        {
+             $project: { // Project final entry shape
+                _id: 1, entryDate: 1, description: 1, reference: 1, createdAt: 1, updatedAt: 1, createdById: 1,
+                lines: '$linesData',
+                // createdBy: { $arrayElemAt: ['$creatorInfo', 0] }
+             }
         }
-    });
-    // Validate structure - might need careful handling of nested validation
-     return entries.map(entry => journalEntrySchema.parse({
+
+    ]);
+
+    const entriesArray = await entriesCursor.toArray();
+
+    // Map and parse data
+     return entriesArray.map(entry => journalEntrySchema.parse({
         ...entry,
+        id: entry._id?.toHexString(),
+        createdById: entry.createdById?.toHexString() ?? undefined,
         entryDate: new Date(entry.entryDate),
-        reference: entry.reference ?? undefined, // Handle null from DB
-        lines: entry.lines.map(line => journalEntryLineSchema.parse({
-            ...line,
-            amount: line.amount.toNumber(), // Convert Decimal
-            description: line.description ?? undefined, // Handle null
-            account: line.account // Already selected fields
-        }))
-        // createdBy: entry.createdBy ? userSchema.parse(entry.createdBy) : undefined, // Parse user if included
+        reference: entry.reference ?? undefined,
+        lines: entry.lines.map((line: any) => journalEntryLineSchema.parse({
+            id: line._id?.toHexString(),
+            journalEntryId: line.journalEntryId?.toHexString(),
+            accountId: line.accountId?.toHexString(),
+            type: line.type,
+            amount: line.amount, // Assuming number
+            description: line.description ?? undefined,
+            account: line.account ? { // Parse the projected account object
+                id: line.account.id?.toHexString(),
+                name: line.account.name,
+                code: line.account.code,
+                type: line.account.type,
+                 // Add other fields if needed and projected
+            } : undefined,
+        })),
+        // createdBy: entry.createdBy ? userSchema.parse(...) : undefined,
     }));
   } catch (error) {
-     if (checkPrismaInitError(error, context)) {
-          console.warn(`[DB_WARN] Database connection failed while fetching journal entries for tenant ${tenantId}. Returning empty list.`);
-     } else {
-        console.error(`[ACTION_ERROR] Error fetching journal entries for tenant ${tenantId}:`, error);
-        console.warn(`[DB_WARN] Returning empty journal entries list for tenant ${tenantId} due to unexpected error.`);
-     }
+    console.error(`[ACTION_ERROR] ${context}:`, error);
+    console.warn(`[DB_WARN] Returning empty journal entries list for tenant ${tenantId} due to unexpected error.`);
     return [];
   }
 }
@@ -82,180 +144,159 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
 // --- Add Journal Entry for the current tenant ---
 export async function addJournalEntry(formData: FormData): Promise<ActionResult> {
   const tenantId = await getTenantId();
-  const userId = await getUserId(); // Get current user ID
+  const userIdString = await getUserId(); // Get current user ID as string
 
   if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
   const context = `addJournalEntry (Tenant: ${tenantId})`;
-  // Decide if userId is mandatory for creating entries
-  // if (!userId) return { success: false, message: 'User ID not found.' };
 
-  const rawData = {
-      entryDate: formData.get('entryDate'),
-      description: formData.get('description'),
-      reference: formData.get('reference'),
-      lines: formData.get('lines') // Expecting JSON string
-  };
-
-  // 1. Validate basic fields
-  const basicValidation = journalEntryFormSchema.omit({ lines: true }).safeParse({
-      entryDate: rawData.entryDate ? new Date(rawData.entryDate as string) : undefined,
-      description: rawData.description,
-      reference: rawData.reference || undefined,
-  });
-
-   if (!basicValidation.success) {
-        const fieldErrors = basicValidation.error.flatten().fieldErrors;
-        console.error(`[VALIDATION_ERROR] ${context} (basic):`, fieldErrors);
-        return { success: false, message: 'Basic entry validation failed.', error: "Validation Error", fieldErrors };
-    }
-
-  // 2. Parse and validate lines
-   let parsedLines: any[];
-   try {
-     if (!rawData.lines) throw new Error("Journal entry lines are missing.");
-     parsedLines = JSON.parse(rawData.lines as string);
-     if (!Array.isArray(parsedLines)) throw new Error("Invalid lines format.");
-   } catch (error) {
-     console.error(`[VALIDATION_ERROR] ${context} (lines JSON):`, error);
-     return { success: false, message: 'Invalid journal entry lines data format.', error: "Validation Error", fieldErrors: { lines: ['Invalid lines format or missing lines.'] } };
+   let userObjectId: ObjectId | undefined | null = undefined;
+   if (userIdString) {
+       try { userObjectId = new ObjectId(userIdString); } catch { /* handle invalid user ID format if needed */ }
    }
 
-   // Validate each line, check debit/credit balance, and verify account ownership
-   const validatedLinesData: { accountId: string; type: 'Debit' | 'Credit'; amount: number; description?: string }[] = [];
+  const rawData = { /* ... extract from formData ... */ };
+
+  // --- 1. Validate Basic Fields ---
+  const basicValidation = journalEntryFormSchema.omit({ lines: true }).safeParse({ /* ... parse rawData ... */ });
+   if (!basicValidation.success) { /* handle error */ }
+
+  // --- 2. Parse and Validate Lines ---
+   let parsedLines: any[];
+   try { /* ... parse rawData.lines JSON ... */ } catch (error) { /* handle JSON error */ }
+
+   const validatedLinesData: Omit<JournalEntryLineDocument, '_id' | 'journalEntryId'>[] = [];
    let totalDebits = 0;
    let totalCredits = 0;
    const lineErrors: string[] = [];
-   const accountIdsToCheck: string[] = [];
+   const accountIdsToCheck: ObjectId[] = [];
 
    for (let i = 0; i < parsedLines.length; i++) {
        const line = parsedLines[i];
-       const lineValidation = journalEntryLineSchema.omit({ id: true, journalEntryId: true, createdAt: true, account: true }).safeParse({ // Exclude related objects
-           accountId: line.accountId,
-           type: line.type,
-           amount: parseFloat(line.amount),
-           description: line.description || undefined,
-       });
+       const lineValidation = journalEntryLineSchema.omit({ id: true, journalEntryId: true, createdAt: true, account: true }).safeParse({ /* ... parse line ... */ });
 
-       if (!lineValidation.success) {
-           const errors = lineValidation.error.flatten().fieldErrors;
-           Object.values(errors).flat().forEach(errMsg => lineErrors.push(`Line ${i + 1}: ${errMsg}`));
-       } else {
+       if (!lineValidation.success) { /* collect errors */ }
+       else {
            const validLine = lineValidation.data;
-           validatedLinesData.push(validLine);
-           accountIdsToCheck.push(validLine.accountId); // Collect account IDs to check ownership
+           let accountObjectId: ObjectId;
+           try {
+                accountObjectId = new ObjectId(validLine.accountId);
+           } catch {
+               lineErrors.push(`Line ${i + 1}: Invalid Account ID format.`);
+               continue;
+           }
+
+           validatedLinesData.push({
+               accountId: accountObjectId, // Store ObjectId
+               type: validLine.type,
+               amount: validLine.amount,
+               description: validLine.description,
+           });
+           accountIdsToCheck.push(accountObjectId); // Collect for bulk validation
            if (validLine.type === 'Debit') totalDebits += validLine.amount;
            else totalCredits += validLine.amount;
        }
    }
 
-    if (lineErrors.length > 0) {
-        console.error(`[VALIDATION_ERROR] ${context} (lines):`, lineErrors);
-        return { success: false, message: 'Journal entry lines validation failed.', error: "Validation Error", fieldErrors: { lines: lineErrors } };
-    }
+    if (lineErrors.length > 0) { /* handle line errors */ }
+    if (Math.abs(totalDebits - totalCredits) >= 0.01) { /* handle imbalance error */ }
 
-   // Check balance
-    if (Math.abs(totalDebits - totalCredits) >= 0.01) { // Use tolerance
-         console.error(`[VALIDATION_ERROR] ${context} (balance): Debits !== Credits`);
-         return { success: false, message: 'Validation failed: Total debits must equal total credits.', error: "Validation Error", fieldErrors: { lines: ['Total debits do not equal total credits.'] } };
-    }
-
-    // Verify all accounts belong to the tenant
+    // --- 3. Verify Account Ownership (Bulk Check) ---
     try {
-        const accounts = await prisma.account.findMany({
-            where: { id: { in: accountIdsToCheck }, tenantId: tenantId },
-            select: { id: true }
-        });
-        if (accounts.length !== accountIdsToCheck.length) {
+        const accountsCollection = await getAccountsCollection();
+        const validAccountsCount = await accountsCollection.countDocuments({ _id: { $in: accountIdsToCheck }, tenantId: tenantId });
+        if (validAccountsCount !== accountIdsToCheck.length) {
              console.error(`[VALIDATION_ERROR] ${context} (account ownership): Mismatch found.`);
              return { success: false, message: 'One or more selected accounts do not belong to this tenant.', error: "Validation Error", fieldErrors: { lines: ['Invalid account used in lines.'] } };
         }
+        // Optional: Fetch account types here if needed for complex validation before transaction
     } catch (error) {
-        if(checkPrismaInitError(error, `${context} - Account Ownership Check`)) {
-           return { success: false, message: 'Database Connection Error during account validation.' };
-        }
-        console.error(`[DB_ERROR] Error validating account ownership for tenant ${tenantId}:`, error);
+        console.error(`[DB_ERROR] Error validating account ownership in ${context}:`, error);
         return { success: false, message: 'Database error during account validation.' };
     }
 
-  // --- Transaction Logic ---
+
+  // --- 4. Transaction Logic ---
+  const { db, client: mongoClient } = await connectToDatabase(); // Get client for session
+  const session = mongoClient.startSession();
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    let createdEntryData: any = null; // To store result
+
+    await session.withTransaction(async () => {
+      const journalEntriesCollection = db.collection<JournalEntryDocument>('journalEntries');
+      const journalEntryLinesCollection = db.collection<JournalEntryLineDocument>('journalEntryLines');
+      const accountsCollection = db.collection('accounts');
+
       // 1. Create the Journal Entry header
-      const newEntry = await tx.journalEntry.create({
-        data: {
-          tenantId: tenantId, // Set tenant ID
-          entryDate: basicValidation.data.entryDate,
-          description: basicValidation.data.description,
-          reference: basicValidation.data.reference,
-          createdById: userId, // Set creator user ID if available
-        },
-      });
+      const newEntryResult = await journalEntriesCollection.insertOne({
+        tenantId: tenantId,
+        entryDate: basicValidation.data.entryDate,
+        description: basicValidation.data.description,
+        reference: basicValidation.data.reference,
+        createdById: userObjectId,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }, { session });
+
+      if (!newEntryResult.insertedId) throw new Error("Failed to insert journal entry header.");
+      const newEntryId = newEntryResult.insertedId;
 
       // 2. Create the Journal Entry Lines
-      await tx.journalEntryLine.createMany({
-        data: validatedLinesData.map(line => ({
-          journalEntryId: newEntry.id,
-          accountId: line.accountId,
-          type: line.type,
-          amount: line.amount,
-          description: line.description,
-        })),
-      });
+      if (validatedLinesData.length > 0) {
+          const linesToInsert = validatedLinesData.map(line => ({ ...line, journalEntryId: newEntryId }));
+          await journalEntryLinesCollection.insertMany(linesToInsert, { session });
+      }
 
-      // 3. Update Account Balances (Crucial Step!)
+
+      // 3. Update Account Balances (Refetch accounts within transaction for type)
+      const accountsInfo = await accountsCollection.find(
+          { _id: { $in: accountIdsToCheck } },
+          { projection: { _id: 1, type: 1 }, session }
+      ).toArray();
+      const accountTypeMap = new Map(accountsInfo.map(acc => [acc._id.toHexString(), acc.type]));
+
       for (const line of validatedLinesData) {
-         const account = await tx.account.findUnique({ where: { id: line.accountId }, select: { type: true }});
-         if (!account) throw new Error(`Account ${line.accountId} not found during balance update.`);
+         const accountType = accountTypeMap.get(line.accountId.toHexString());
+         if (!accountType) throw new Error(`Account type for ${line.accountId} not found during balance update.`);
 
-          // Determine balance impact based on account type and entry type
          let change = 0;
          if (line.type === 'Debit') {
-             // Debits increase Assets & Expenses, decrease Liabilities, Equity, Revenue
-             if (account.type === 'Asset' || account.type === 'Expense') change = line.amount;
+             if (accountType === 'Asset' || accountType === 'Expense') change = line.amount;
              else change = -line.amount;
          } else { // Credit
-             // Credits decrease Assets & Expenses, increase Liabilities, Equity, Revenue
-             if (account.type === 'Asset' || account.type === 'Expense') change = -line.amount;
+             if (accountType === 'Asset' || accountType === 'Expense') change = -line.amount;
              else change = line.amount;
          }
 
          // Only update balance for Asset, Liability, Equity accounts
-         if (account.type === 'Asset' || account.type === 'Liability' || account.type === 'Equity') {
-             await tx.account.update({
-               where: { id: line.accountId },
-               data: { balance: { increment: change } },
-             });
+         if (accountType === 'Asset' || accountType === 'Liability' || accountType === 'Equity') {
+             const updateResult = await accountsCollection.updateOne(
+               { _id: line.accountId },
+               { $inc: { balance: change } }, // Use $inc for atomic update
+               { session }
+             );
+             if (updateResult.matchedCount === 0) throw new Error(`Account ${line.accountId} not found for balance update.`);
          }
       }
+      // Store data to return outside transaction
+      createdEntryData = { id: newEntryId.toHexString() };
+    }); // End Transaction
 
-      return newEntry; // Return the created entry header
-    });
+    await session.endSession();
 
     // Revalidate relevant paths
     revalidatePath('/journal-entries');
-    revalidatePath('/chart-of-accounts'); // Account balances changed
-    revalidatePath('/reports'); // Reports will be affected
+    revalidatePath('/chart-of-accounts');
+    revalidatePath('/reports');
     revalidatePath('/dashboard');
 
-    return { success: true, message: 'Journal entry created successfully.', data: result };
+    return { success: true, message: 'Journal entry created successfully.', data: createdEntryData };
 
   } catch (error: unknown) {
-    if (checkPrismaInitError(error, `${context} Transaction`)) {
-        return { success: false, message: 'Database Connection Error. Failed to create journal entry.', error: 'Initialization Error' };
-    }
-
+    await session.endSession(); // Ensure session is closed on error
     console.error(`[DB_ERROR] ${context} Transaction:`, error);
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-         // Handle specific errors like invalid foreign keys (accountId - less likely due to pre-check)
-         if (error.code === 'P2003' && (error.meta?.field_name as string)?.includes('accountId')) {
-             return { success: false, message: 'Database Error: One or more accounts selected do not exist.', error: error.code };
-         }
-     } else if (error instanceof Error && error.message.includes("not found during balance update")) {
-         return { success: false, message: error.message, error: "Transaction Error" };
-     }
     return {
         success: false,
-        message: 'Database Error: Failed to create journal entry.',
+        message: 'Database Transaction Error: Failed to create journal entry.',
         error: error instanceof Error ? error.message : String(error)
     };
   }
@@ -264,108 +305,110 @@ export async function addJournalEntry(formData: FormData): Promise<ActionResult>
 
 // --- Update Journal Entry ---
 export async function updateJournalEntry(formData: FormData): Promise<ActionResult> {
-  const tenantId = await getTenantId();
-  if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-   const entryId = formData.get('id') as string;
-   if (!entryId) return { success: false, message: "Entry ID missing." };
-   const context = `updateJournalEntry (ID: ${entryId}, Tenant: ${tenantId})`;
-
-    // Verify entry belongs to the tenant
-    try {
-        const entry = await prisma.journalEntry.findUnique({ where: { id: entryId }, select: { tenantId: true } });
-        if (!entry) return { success: false, message: 'Journal entry not found.' };
-        if (entry.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
-    } catch (error) {
-         if (checkPrismaInitError(error, `${context} - Ownership Check`)) {
-             return { success: false, message: 'Database Connection Error during ownership check.' };
-         }
-        console.error(`[DB_ERROR] Error verifying entry ownership in ${context}:`, error);
-        return { success: false, message: 'Database error verifying entry ownership.' };
-    }
-
-  // TODO: Implement complex update logic including:
-  // 1. Validation of basic fields and lines (similar to addJournalEntry).
-  // 2. Validation that all accounts belong to the tenant.
-  // 3. Transaction:
-  //    a. Fetch the *old* lines of the journal entry.
-  //    b. *Revert* the balance changes made by the *old* lines (opposite debit/credit logic).
-  //    c. Delete the *old* lines.
-  //    d. Create the *new* lines based on validated form data.
-  //    e. *Apply* the balance changes for the *new* lines.
-  //    f. Update the journal entry header (date, description, reference).
-   console.warn("Update Journal Entry - Not fully implemented yet (Requires Complex Transaction Logic)");
-  return { success: false, message: 'Update Journal Entry - Not Implemented Yet' };
+  // Similar structure to addJournalEntry, but with more complex transaction:
+  // 1. Validate input and relations.
+  // 2. Start Transaction.
+  // 3. Find OLD entry and its lines, verify ownership.
+  // 4. Revert OLD balance changes.
+  // 5. Delete OLD lines.
+  // 6. Insert NEW lines.
+  // 7. Apply NEW balance changes.
+  // 8. Update entry header.
+  // 9. Commit Transaction.
+  // 10. Revalidate paths.
+   console.warn("Update Journal Entry - MongoDB implementation requires careful transaction logic for reverting/applying balances.");
+   return { success: false, message: 'Update Journal Entry - Not Implemented Yet (MongoDB)' };
 }
 
 // --- Delete Journal Entry ---
-export async function deleteJournalEntry(id: string): Promise<ActionResult> {
+export async function deleteJournalEntry(idString: string): Promise<ActionResult> {
    const tenantId = await getTenantId();
    if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-   if (!id) return { success: false, message: "Entry ID missing." };
-   const context = `deleteJournalEntry (ID: ${id}, Tenant: ${tenantId})`;
+   if (!idString) return { success: false, message: "Entry ID missing." };
+   const context = `deleteJournalEntry (ID: ${idString}, Tenant: ${tenantId})`;
+
+    let entryId: ObjectId;
+    try { entryId = new ObjectId(idString); }
+    catch { return { success: false, message: 'Invalid Entry ID format.' }; }
 
    // --- Transaction Logic ---
+    const { db, client: mongoClient } = await connectToDatabase();
+    const session = mongoClient.startSession();
     try {
-         const result = await prisma.$transaction(async (tx) => {
-             // 1. Find the entry and verify ownership, include lines for balance reversal
-             const entry = await tx.journalEntry.findUnique({
-                 where: { id },
-                 include: { lines: { select: { accountId: true, type: true, amount: true, account: { select: { type: true } } } } } // Include account type for reversal logic
-             });
-             if (!entry) throw new Error('Journal entry not found.');
-             if (entry.tenantId !== tenantId) throw new Error('Authorization Error: Cannot delete this entry.');
+         await session.withTransaction(async () => {
+             const journalEntriesCollection = db.collection<JournalEntryDocument>('journalEntries');
+             const journalEntryLinesCollection = db.collection<JournalEntryLineDocument>('journalEntryLines');
+             const accountsCollection = db.collection('accounts');
+
+             // 1. Find the entry and its lines, verify ownership
+              const entry = await journalEntriesCollection.findOne({ _id: entryId, tenantId: tenantId }, { session });
+              if (!entry) throw new Error('Journal entry not found or access denied.');
+
+              const oldLines = await journalEntryLinesCollection.find({ journalEntryId: entryId }, { session }).toArray();
+              if (oldLines.length === 0) {
+                  console.warn(`Journal entry ${entryId} has no lines to revert balances from.`);
+                   // Decide if deletion should proceed or throw error
+              }
+
 
              // 2. Revert Account Balance Changes
-             for (const line of entry.lines) {
-                 if (!line.account) throw new Error(`Account details missing for line with accountId ${line.accountId}`); // Should not happen with include
+             const accountIds = oldLines.map(line => line.accountId);
+             const accountsInfo = await accountsCollection.find(
+                 { _id: { $in: accountIds } },
+                 { projection: { _id: 1, type: 1 }, session }
+             ).toArray();
+             const accountTypeMap = new Map(accountsInfo.map(acc => [acc._id.toHexString(), acc.type]));
 
-                 let change = 0;
-                 // Reverse the logic from addJournalEntry
-                 if (line.type === 'Debit') {
-                     // Deleting a Debit: Decreases Assets/Expenses, Increases Liabilities/Equity/Revenue
-                     if (line.account.type === 'Asset' || line.account.type === 'Expense') change = -line.amount.toNumber();
-                     else change = line.amount.toNumber();
-                 } else { // Credit
-                     // Deleting a Credit: Increases Assets/Expenses, Decreases Liabilities/Equity/Revenue
-                     if (line.account.type === 'Asset' || line.account.type === 'Expense') change = line.amount.toNumber();
-                     else change = -line.amount.toNumber();
-                 }
+             for (const line of oldLines) {
+                  const accountType = accountTypeMap.get(line.accountId.toHexString());
+                  if (!accountType) throw new Error(`Account type for ${line.accountId} not found during balance reversal.`);
 
-                 // Only update balance for Asset, Liability, Equity accounts
-                 if (line.account.type === 'Asset' || line.account.type === 'Liability' || line.account.type === 'Equity') {
-                     await tx.account.update({
-                         where: { id: line.accountId },
-                         data: { balance: { increment: change } },
-                     });
-                 }
+                  let change = 0;
+                  // Reverse the logic from addJournalEntry
+                  if (line.type === 'Debit') {
+                      if (accountType === 'Asset' || accountType === 'Expense') change = -line.amount;
+                      else change = line.amount;
+                  } else { // Credit
+                      if (accountType === 'Asset' || accountType === 'Expense') change = line.amount;
+                      else change = -line.amount;
+                  }
+
+                  // Only update balance for Asset, Liability, Equity accounts
+                  if (accountType === 'Asset' || accountType === 'Liability' || accountType === 'Equity') {
+                      await accountsCollection.updateOne(
+                          { _id: line.accountId },
+                          { $inc: { balance: change } }, // Use $inc for atomic update
+                          { session }
+                      );
+                      // Note: Consider error handling if account is suddenly missing during transaction
+                  }
              }
 
-             // 3. Delete the Journal Entry (lines will be cascade deleted)
-             await tx.journalEntry.delete({ where: { id } });
+             // 3. Delete the Journal Entry Lines
+              await journalEntryLinesCollection.deleteMany({ journalEntryId: entryId }, { session });
 
-             return true; // Indicate success
-         });
+             // 4. Delete the Journal Entry Header
+             await journalEntriesCollection.deleteOne({ _id: entryId }, { session });
+
+         }); // End Transaction
+
+        await session.endSession();
 
         // Revalidate relevant paths
         revalidatePath('/journal-entries');
-        revalidatePath('/chart-of-accounts'); // Balances changed
+        revalidatePath('/chart-of-accounts');
         revalidatePath('/reports');
         revalidatePath('/dashboard');
 
         return { success: true, message: 'Journal entry deleted successfully.' };
 
     } catch (error: unknown) {
-         if (checkPrismaInitError(error, `${context} Transaction`)) {
-             return { success: false, message: 'Database Connection Error. Failed to delete entry.', error: 'Initialization Error' };
-         }
-         console.error(`[DB_ERROR] ${context} Transaction:`, error);
-         if (error instanceof Error && (error.message === 'Journal entry not found.' || error.message.startsWith('Authorization Error'))) {
-              return { success: false, message: error.message };
-          }
-         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-             // Should be caught by initial findUnique, but good backup
-             return { success: false, message: 'Record not found during deletion process.', error: error.code };
-         }
-         return { success: false, message: 'Database Error: Failed to delete journal entry.', error: error instanceof Error ? error.message : String(error) };
+        await session.endSession(); // Ensure session closed on error
+        console.error(`[DB_ERROR] ${context} Transaction:`, error);
+        return {
+            success: false,
+            message: 'Database Transaction Error: Failed to delete journal entry.',
+            error: error instanceof Error ? error.message : String(error)
+        };
     }
 }

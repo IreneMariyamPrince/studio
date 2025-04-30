@@ -1,46 +1,42 @@
 
 'use server';
 
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { Collection, ObjectId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { startOfYear, endOfYear, startOfMonth, endOfMonth } from 'date-fns';
 import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
+// Helper to get collections
+async function getJournalEntryLinesCollection(): Promise<Collection<any>> { // Define specific type if needed
+  const { db } = await connectToDatabase();
+  return db.collection('journalEntryLines');
+}
+async function getAccountsCollection(): Promise<Collection<any>> {
+  const { db } = await connectToDatabase();
+  return db.collection('accounts');
+}
+async function getInvoicesCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('invoices');
+}
+async function getPaymentsCollection(): Promise<Collection<any>> {
+    const { db } = await connectToDatabase();
+    return db.collection('payments');
 }
 
-// Helper to safely execute Prisma calls and handle init errors specifically
-async function safePrismaCall<T>(prismaPromise: Promise<T>, fallback: T, tenantId: string | null, context: string): Promise<T> {
+
+// Helper to safely execute MongoDB calls and handle errors
+async function safeMongoCall<T>(mongoPromise: Promise<T>, fallback: T, tenantId: string | null, context: string): Promise<T> {
     if (!tenantId) {
         console.error(`[ACTION_ERROR] Tenant ID missing in ${context}.`);
-        // Depending on the report, you might return fallback or throw
-        return fallback; // Returning fallback for reports often makes sense
+        return fallback;
     }
     try {
-        return await prismaPromise;
+        return await mongoPromise;
     } catch (error) {
-        if (checkPrismaInitError(error, `${context} (Tenant: ${tenantId})`)) {
-            console.warn(`[DB_WARN] Database connection failed during ${context} for tenant ${tenantId}. Returning fallback data.`);
-        } else {
-            console.error(`[REPORT_ERROR] Error executing Prisma call in ${context} for tenant ${tenantId}:`, error);
-             console.warn(`[DB_WARN] Returning fallback data for ${context} for tenant ${tenantId} due to unexpected error.`);
-        }
-        return fallback; // Return fallback data on any error
+        console.error(`[REPORT_ERROR] Error executing MongoDB call in ${context} for tenant ${tenantId}:`, error);
+        console.warn(`[DB_WARN] Returning fallback data for ${context} for tenant ${tenantId} due to unexpected error.`);
+        return fallback;
     }
 }
 
@@ -60,108 +56,75 @@ export async function getProfitLossData(startDate: Date, endDate: Date): Promise
     if (!tenantId) return fallbackData;
 
     console.log(`Generating P&L from ${startDate.toISOString()} to ${endDate.toISOString()} for Tenant: ${tenantId}`);
+    const context = `getProfitLossData (Tenant: ${tenantId})`;
 
-    // --- More accurate P&L using Journal Entries ---
-    const aggregationContext = `getProfitLossData Aggregation`;
+    try {
+        const journalLinesCollection = await getJournalEntryLinesCollection();
 
-    const accountAggregations = await safePrismaCall(
-        prisma.journalEntryLine.groupBy({
-            by: ['accountId'],
-            where: {
-                journalEntry: {
-                    tenantId: tenantId,
-                    entryDate: {
-                        gte: startDate,
-                        lte: endDate,
-                    },
-                },
-                account: {
-                    // Include only Revenue and Expense accounts relevant to P&L
-                    type: { in: ['Revenue', 'Expense'] }
-                }
-            },
-            _sum: {
-                amount: true, // Sum all amounts for the period
-            },
-            // We also need debits and credits separately for accurate P&L calculation
-            // This requires a more complex query or fetching raw lines
-        }),
-        [], tenantId, aggregationContext
-    );
-
-    // Fetch account details (name, type) for the aggregated IDs
-    const accountIds = accountAggregations.map(agg => agg.accountId);
-    const accounts = await safePrismaCall(
-         prisma.account.findMany({
-             where: { id: { in: accountIds }, tenantId: tenantId },
-             select: { id: true, name: true, type: true }
-         }),
-         [], tenantId, `getProfitLossData Account Fetch`
-     );
-    const accountMap = new Map(accounts.map(acc => [acc.id, acc]));
+        // Aggregate directly on lines, joining account info
+        const aggregationPipeline = [
+          { // Match lines within date range (requires entryDate on lines or joining entries first)
+            // Assuming we join JournalEntry to get the date:
+            $lookup: { from: 'journalEntries', localField: 'journalEntryId', foreignField: '_id', as: 'entryInfo' }
+          },
+          { $unwind: '$entryInfo' },
+          { $match: { 'entryInfo.tenantId': tenantId, 'entryInfo.entryDate': { $gte: startDate, $lte: endDate } } },
+          { // Join account info
+            $lookup: { from: 'accounts', localField: 'accountId', foreignField: '_id', as: 'accountDetails' }
+          },
+          { $unwind: '$accountDetails' },
+          { // Filter for Revenue & Expense accounts
+            $match: { 'accountDetails.tenantId': tenantId, 'accountDetails.type': { $in: ['Revenue', 'Expense'] } }
+          },
+          { // Group by account to calculate net change
+            $group: {
+              _id: '$accountId',
+              accountName: { $first: '$accountDetails.name' },
+              accountType: { $first: '$accountDetails.type' },
+              totalDebits: { $sum: { $cond: [{ $eq: ['$type', 'Debit'] }, '$amount', 0] } },
+              totalCredits: { $sum: { $cond: [{ $eq: ['$type', 'Credit'] }, '$amount', 0] } }
+            }
+          }
+        ];
 
 
-    let totalRevenue = 0;
-    let totalExpenses = 0;
-    const revenueBreakdown: ProfitLossData['revenue'] = [];
-    const expenseBreakdown: ProfitLossData['expenses'] = [];
-
-    // Fetch raw lines for accurate calculation (more robust than relying on net sum)
-    const linesData = await safePrismaCall(
-        prisma.journalEntryLine.findMany({
-            where: {
-                 journalEntry: {
-                    tenantId: tenantId,
-                    entryDate: { gte: startDate, lte: endDate },
-                 },
-                 accountId: { in: accountIds } // Filter by relevant P&L account IDs
-            },
-            select: { accountId: true, type: true, amount: true }
-        }),
-        [], tenantId, `getProfitLossData Lines Fetch`
-    );
-
-    const accountTotals = new Map<string, { debits: number, credits: number }>();
-
-    linesData.forEach(line => {
-        const current = accountTotals.get(line.accountId) ?? { debits: 0, credits: 0 };
-        const amount = line.amount.toNumber();
-        if (line.type === 'Debit') {
-            current.debits += amount;
-        } else {
-            current.credits += amount;
-        }
-        accountTotals.set(line.accountId, current);
-    });
+        const results = await safeMongoCall(journalLinesCollection.aggregate(aggregationPipeline).toArray(), [], tenantId, context);
 
 
-    for (const account of accounts) {
-        const totals = accountTotals.get(account.id);
-        if (!totals) continue;
+        let totalRevenue = 0;
+        let totalExpenses = 0;
+        const revenueBreakdown: ProfitLossData['revenue'] = [];
+        const expenseBreakdown: ProfitLossData['expenses'] = [];
 
-        let netChange = 0;
-        // Revenue increases with Credits, decreases with Debits
-        if (account.type === 'Revenue') {
-            netChange = totals.credits - totals.debits;
-            totalRevenue += netChange;
-            revenueBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
-        }
-        // Expenses increase with Debits, decrease with Credits
-        else if (account.type === 'Expense') {
-            netChange = totals.debits - totals.credits;
-            totalExpenses += netChange;
-            expenseBreakdown.push({ accountId: account.id, accountName: account.name, total: netChange });
-        }
+        results.forEach((res: any) => {
+            let netChange = 0;
+             // Revenue increases with Credits, decreases with Debits (Normal Credit Balance)
+            if (res.accountType === 'Revenue') {
+                netChange = res.totalCredits - res.totalDebits;
+                totalRevenue += netChange;
+                revenueBreakdown.push({ accountId: res._id.toHexString(), accountName: res.accountName, total: netChange });
+            }
+             // Expenses increase with Debits, decrease with Credits (Normal Debit Balance)
+            else if (res.accountType === 'Expense') {
+                netChange = res.totalDebits - res.totalCredits;
+                totalExpenses += netChange;
+                expenseBreakdown.push({ accountId: res._id.toHexString(), accountName: res.accountName, total: netChange });
+            }
+        });
+
+
+        return {
+            revenue: revenueBreakdown,
+            expenses: expenseBreakdown,
+            netProfit: totalRevenue - totalExpenses, // Revenue is typically positive, expenses positive
+            startDate,
+            endDate,
+        };
+    } catch (error) {
+         // This catch block might be redundant if safeMongoCall handles it, but good for safety.
+         console.error(`[REPORT_ERROR] Top-level error in ${context}:`, error);
+         return fallbackData;
     }
-
-
-    return {
-        revenue: revenueBreakdown,
-        expenses: expenseBreakdown,
-        netProfit: totalRevenue - totalExpenses,
-        startDate,
-        endDate,
-    };
 }
 
 // --- Balance Sheet Report Data ---
@@ -171,7 +134,7 @@ export interface BalanceSheetData {
     equity: { accountId: string; accountName: string; balance: number }[];
     totalAssets: number;
     totalLiabilitiesAndEquity: number;
-    asOfDate: Date;
+    asOfDate: Date; // Balance sheet is a snapshot at a point in time
 }
 
 export async function getBalanceSheetData(asOfDate: Date): Promise<BalanceSheetData> {
@@ -180,18 +143,19 @@ export async function getBalanceSheetData(asOfDate: Date): Promise<BalanceSheetD
      if (!tenantId) return fallbackData;
 
      console.log(`Generating Balance Sheet as of ${asOfDate.toISOString()} for Tenant: ${tenantId}`);
+     const context = `getBalanceSheetData (Tenant: ${tenantId})`;
 
-     // Fetch accounts directly, balance should be up-to-date via transactions
-     const accountsData = await safePrismaCall(
-         prisma.account.findMany({
-             where: {
-                 tenantId: tenantId,
-                 isActive: true,
-                 type: { in: ['Asset', 'Liability', 'Equity'] } // Only Balance Sheet accounts
-             },
-             select: { id: true, name: true, type: true, balance: true }
-         }),
-         [], tenantId, `getBalanceSheetData Account Fetch`
+     // Fetch accounts directly - balance should be accurate as of the latest transaction
+     const accountsCollection = await getAccountsCollection();
+     const accountsData = await safeMongoCall(
+         accountsCollection.find({
+             tenantId: tenantId,
+             isActive: true,
+             type: { $in: ['Asset', 'Liability', 'Equity'] }
+         }, {
+             projection: { _id: 1, name: 1, type: 1, balance: 1 }
+         }).toArray(),
+         [], tenantId, context
      );
 
      const assets: BalanceSheetData['assets'] = [];
@@ -199,8 +163,8 @@ export async function getBalanceSheetData(asOfDate: Date): Promise<BalanceSheetD
      const equity: BalanceSheetData['equity'] = [];
 
      accountsData.forEach(acc => {
-         const balance = acc.balance?.toNumber() ?? 0;
-         const accountDetail = { accountId: acc.id, accountName: acc.name, balance: balance };
+         const balance = acc.balance ?? 0; // Default to 0 if balance is null/undefined
+         const accountDetail = { accountId: acc._id.toHexString(), accountName: acc.name, balance: balance };
          if (acc.type === 'Asset') assets.push(accountDetail);
          else if (acc.type === 'Liability') liabilities.push(accountDetail);
          else if (acc.type === 'Equity') equity.push(accountDetail);
@@ -233,7 +197,7 @@ export interface ARAgingData {
     invoiceNumber: string;
     dueDate: Date;
     invoiceTotal: number;
-    amountDue: number; // Calculate based on payments received
+    amountDue: number;
     daysOverdue: number;
     bucket: 'Current' | '1-30' | '31-60' | '61-90' | '90+';
 }
@@ -241,67 +205,74 @@ export interface ARAgingData {
 export async function getArAgingData(asOfDate: Date): Promise<ARAgingData[]> {
     const tenantId = await getTenantId();
     if (!tenantId) return [];
+    const context = `getArAgingData (Tenant: ${tenantId})`;
 
     console.log(`Generating A/R Aging as of ${asOfDate.toISOString()} for Tenant: ${tenantId}`);
 
-    const unpaidInvoices = await safePrismaCall(
-        prisma.invoice.findMany({
-            where: {
-                tenantId: tenantId,
-                status: { in: ['Pending', 'Partial', 'Overdue'] } // Include statuses representing money owed
-            },
-            include: {
-                client: { select: { id: true, name: true } },
-                payments: { select: { amount: true } } // Fetch payments to calculate amount due
-            }
-        }),
-        [], tenantId, `getArAgingData Invoice Fetch`
-    );
+    const invoicesCollection = await getInvoicesCollection();
+    const paymentsCollection = await getPaymentsCollection();
+
+    // 1. Find unpaid/partially paid invoices
+    const unpaidInvoicesCursor = invoicesCollection.aggregate([
+        { $match: { tenantId: tenantId, status: { $in: ['Pending', 'Partial', 'Overdue'] } } },
+         { // Join client info
+             $lookup: { from: 'clients', localField: 'clientId', foreignField: '_id', as: 'clientInfo' }
+         },
+         { $unwind: '$clientInfo' },
+         { // Project needed fields before payment lookup
+             $project: {
+                 _id: 1, invoiceNumber: 1, dueDate: 1, total: 1, status: 1,
+                 clientId: 1, clientName: '$clientInfo.name'
+             }
+         }
+    ]);
+    const unpaidInvoices = await safeMongoCall(unpaidInvoicesCursor.toArray(), [], tenantId, `${context} - Invoice Fetch`);
 
     const agingData: ARAgingData[] = [];
     const todayTime = asOfDate.getTime();
 
-    unpaidInvoices.forEach(invoice => {
-        const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount.toNumber(), 0);
-        const amountDue = invoice.total.toNumber() - totalPaid;
+    // 2. For each unpaid invoice, calculate total payments
+    for (const invoice of unpaidInvoices) {
+        const invoiceId = invoice._id;
+        const payments = await safeMongoCall(
+            paymentsCollection.find({ invoiceId: invoiceId, tenantId: tenantId }, { projection: { amount: 1 } }).toArray(),
+            [], tenantId, `${context} - Payment Fetch for Invoice ${invoiceId}`
+        );
 
-        if (amountDue <= 0.005) return; // Skip fully paid invoices (with tolerance)
+        const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
+        const amountDue = invoice.total - totalPaid;
 
-        const dueDateTime = invoice.dueDate.getTime();
+        if (amountDue <= 0.005) continue; // Skip if effectively paid
+
+        const dueDateTime = new Date(invoice.dueDate).getTime(); // Ensure it's a Date object
         const diffTime = todayTime - dueDateTime;
-        const diffDays = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24))); // Calculate days overdue (non-negative)
+        const diffDays = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
 
         let bucket: ARAgingData['bucket'];
-        if (diffTime <= 0) { // Due date is today or in the future
-            bucket = 'Current';
-        } else if (diffDays <= 30) {
-            bucket = '1-30';
-        } else if (diffDays <= 60) {
-            bucket = '31-60';
-        } else if (diffDays <= 90) {
-            bucket = '61-90';
-        } else {
-            bucket = '90+';
-        }
+        if (diffTime <= 0) bucket = 'Current';
+        else if (diffDays <= 30) bucket = '1-30';
+        else if (diffDays <= 60) bucket = '31-60';
+        else if (diffDays <= 90) bucket = '61-90';
+        else bucket = '90+';
 
         agingData.push({
-            clientId: invoice.clientId,
-            clientName: invoice.client.name,
-            invoiceId: invoice.id,
-            invoiceNumber: invoice.invoiceNumber || `INV-${invoice.id.substring(0,4)}`,
-            dueDate: invoice.dueDate,
-            invoiceTotal: invoice.total.toNumber(),
+            clientId: invoice.clientId.toHexString(),
+            clientName: invoice.clientName,
+            invoiceId: invoiceId.toHexString(),
+            invoiceNumber: invoice.invoiceNumber || `INV-${invoiceId.toHexString().substring(0,4)}`,
+            dueDate: new Date(invoice.dueDate),
+            invoiceTotal: invoice.total,
             amountDue: amountDue,
-            daysOverdue: diffDays > 0 ? diffDays : 0, // Show 0 if not overdue
+            daysOverdue: diffDays > 0 ? diffDays : 0,
             bucket: bucket,
         });
-    });
+    }
 
-    return agingData.sort((a, b) => b.daysOverdue - a.daysOverdue); // Sort by most overdue first
+    return agingData.sort((a, b) => b.daysOverdue - a.daysOverdue);
 }
 
 // --- Add other report data fetching functions as needed ---
-// - Cash Flow Statement (requires careful analysis of JE lines and payment types)
-// - A/P Aging (similar to A/R, but for Expenses/Vendors)
+// - Cash Flow Statement
+// - A/P Aging
 // - Expense by Category/Vendor
 // - Budget vs. Actuals

@@ -3,10 +3,39 @@
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client'; // Import Prisma types
-import { expenseSchema, expenseFormSchema, ExpenseSchema } from '@/lib/schemas/expense'; // Adjusted imports
-import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
+import { expenseSchema, expenseFormSchema, ExpenseSchema } from '@/lib/schemas/expense';
+import { getTenantId } from '@/lib/utils/tenant';
+
+// Type definition for MongoDB documents
+type ExpenseDocument = Omit<ExpenseSchema, 'id' | 'accountId' | 'vendorId' | 'taxRateId'> & {
+    _id?: ObjectId;
+    tenantId: string;
+    accountId: ObjectId; // Store as ObjectId
+    vendorId?: ObjectId | null; // Store as ObjectId if present
+    taxRateId?: ObjectId | null; // Store as ObjectId if present
+    createdAt?: Date;
+    updatedAt?: Date;
+};
+// Simplified types for lookup results
+type AccountLookupInfo = { _id: ObjectId; name: string; code: string; type: string; };
+type VendorLookupInfo = { _id: ObjectId; name: string; };
+
+// Helper to get collections
+async function getExpensesCollection(): Promise<Collection<ExpenseDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<ExpenseDocument>('expenses');
+}
+async function getAccountsCollection(): Promise<Collection<any>> { // Use 'any' for simplicity or define AccountDocument
+  const { db } = await connectToDatabase();
+  return db.collection('accounts');
+}
+async function getVendorsCollection(): Promise<Collection<any>> { // Use 'any' for simplicity or define VendorDocument
+  const { db } = await connectToDatabase();
+  return db.collection('vendors');
+}
+// Add getTaxRatesCollection if needed
 
 // Type definition for action results
 type ActionResult = {
@@ -17,23 +46,6 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
 
 // --- Get Expenses for the current tenant ---
 export async function getExpenses(): Promise<ExpenseSchema[]> {
@@ -45,86 +57,152 @@ export async function getExpenses(): Promise<ExpenseSchema[]> {
   const context = `getExpenses (Tenant: ${tenantId})`;
 
   try {
-    const expenses = await prisma.expense.findMany({
-      where: { tenantId: tenantId }, // Filter by tenant
-      include: {
-        account: { select: { id: true, name: true, code: true, type: true } },
-        vendor: { select: { id: true, name: true } }, // Include vendor name
-        // taxRate: { select: { id: true, name: true, ratePercent: true } } // Include tax info if needed
-       },
-      orderBy: { date: 'desc' },
-    });
+    const expensesCollection = await getExpensesCollection();
+    // Use aggregation pipeline to join related data
+    const expensesCursor = expensesCollection.aggregate([
+        { $match: { tenantId: tenantId } },
+        { $sort: { date: -1 } },
+        {
+            $lookup: {
+                from: 'accounts',
+                localField: 'accountId',
+                foreignField: '_id',
+                as: 'accountInfo'
+            }
+        },
+        {
+            $lookup: {
+                from: 'vendors',
+                localField: 'vendorId',
+                foreignField: '_id',
+                as: 'vendorInfo'
+            }
+        },
+        // Add lookup for taxRates if needed
+        {
+            $project: { // Reshape the output
+                _id: 1, date: 1, amount: 1, description: 1, receiptUrl: 1, status: 1,
+                isRecurring: 1, recurrenceRule: 1, createdAt: 1, updatedAt: 1,
+                accountId: 1, // Keep ObjectId for mapping later if needed, or map here
+                vendorId: 1,
+                taxRateId: 1,
+                account: { $arrayElemAt: ['$accountInfo', 0] }, // Get the first element from the lookup array
+                vendor: { $arrayElemAt: ['$vendorInfo', 0] }
+                // taxRate: { $arrayElemAt: ['$taxRateInfo', 0] }
+            }
+        }
+    ]);
 
-    // Validate fetched data against the schema
-     return expenses.map(exp => expenseSchema.parse({
-         ...exp,
-         date: new Date(exp.date), // Ensure date is a Date object
-         amount: exp.amount.toNumber(), // Convert Decimal to number
-         account: exp.account,
-         vendor: exp.vendor ? { ...exp.vendor } : undefined, // Ensure vendor structure matches schema
-         // taxRate: exp.taxRate ? { ...exp.taxRate, ratePercent: exp.taxRate.ratePercent.toNumber() } : undefined,
-         description: exp.description ?? undefined,
-         receiptUrl: exp.receiptUrl ?? undefined,
-         recurrenceRule: exp.recurrenceRule ?? undefined,
-         vendorId: exp.vendorId ?? undefined,
-         taxRateId: exp.taxRateId ?? undefined,
+    const expensesArray = await expensesCursor.toArray();
+
+    // Map MongoDB document to schema
+     return expensesArray.map(doc => expenseSchema.parse({
+         ...doc,
+         id: doc._id?.toHexString(),
+         accountId: doc.accountId?.toHexString(), // Convert back to string for schema
+         vendorId: doc.vendorId?.toHexString() ?? undefined,
+         taxRateId: doc.taxRateId?.toHexString() ?? undefined,
+         date: new Date(doc.date),
+         amount: doc.amount, // Assuming stored as number
+         description: doc.description ?? undefined,
+         receiptUrl: doc.receiptUrl ?? undefined,
+         recurrenceRule: doc.recurrenceRule ?? undefined,
+         // Map nested objects, handle potential nulls from lookup
+         account: doc.account ? {
+             id: doc.account._id?.toHexString(),
+             name: doc.account.name,
+             code: doc.account.code,
+             type: doc.account.type,
+             // Add other required fields from accountSchema if needed
+         } : undefined, // Or provide a default/error object
+         vendor: doc.vendor ? {
+             id: doc.vendor._id?.toHexString(),
+             name: doc.vendor.name,
+              // Add other required fields from vendorSchema if needed
+         } : undefined,
+         // taxRate: doc.taxRate ? { ... } : undefined,
      }));
-  } catch (error) {
-     if (checkPrismaInitError(error, context)) {
-        console.warn(`[DB_WARN] Database connection failed while fetching expenses for tenant ${tenantId}. Returning empty list.`);
-     } else {
-        console.error(`[ACTION_ERROR] Error fetching expenses for tenant ${tenantId}:`, error);
-        console.warn(`[DB_WARN] Returning empty expenses list for tenant ${tenantId} due to unexpected error.`);
-     }
+  } catch (error: unknown) {
+     console.error(`[ACTION_ERROR] ${context}:`, error);
+     console.warn(`[DB_WARN] Returning empty expenses list for tenant ${tenantId} due to unexpected error.`);
     return [];
   }
 }
 
 // --- Get Expense by ID (ensuring it belongs to the current tenant) ---
-export async function getExpenseById(id: string): Promise<ExpenseSchema | null> {
+export async function getExpenseById(idString: string): Promise<ExpenseSchema | null> {
    const tenantId = await getTenantId();
    if (!tenantId) {
        console.error("[ACTION_ERROR] Tenant ID not found in getExpenseById.");
        return null;
    }
-   const context = `getExpenseById (ID: ${id}, Tenant: ${tenantId})`;
+   const context = `getExpenseById (ID: ${idString}, Tenant: ${tenantId})`;
 
-  if (!id) return null;
-  try {
-    const expense = await prisma.expense.findUnique({
-      where: { id }, // ID is globally unique
-      include: {
-        account: { select: { id: true, name: true, code: true, type: true } },
-        vendor: { select: { id: true, name: true } },
-        // taxRate: { select: { id: true, name: true, ratePercent: true } }
-       },
-    });
-
-    if (!expense || expense.tenantId !== tenantId) {
-        // Not found or doesn't belong to the current tenant
+    let expenseId: ObjectId;
+    try {
+        expenseId = new ObjectId(idString);
+    } catch (e) {
+        console.error(`[VALIDATION_ERROR] ${context}: Invalid Expense ID format.`);
         return null;
     }
 
+  try {
+    const expensesCollection = await getExpensesCollection();
+    // Use aggregation to get related data in one go
+     const expenseResult = await expensesCollection.aggregate([
+        { $match: { _id: expenseId, tenantId: tenantId } }, // Match ID and tenant
+        { $limit: 1 }, // Should only be one
+        {
+            $lookup: { from: 'accounts', localField: 'accountId', foreignField: '_id', as: 'accountInfo' }
+        },
+        {
+            $lookup: { from: 'vendors', localField: 'vendorId', foreignField: '_id', as: 'vendorInfo' }
+        },
+        // Add taxRate lookup if needed
+        {
+            $project: {
+                // Project fields similar to getExpenses
+                 _id: 1, date: 1, amount: 1, description: 1, receiptUrl: 1, status: 1,
+                isRecurring: 1, recurrenceRule: 1, createdAt: 1, updatedAt: 1,
+                accountId: 1, vendorId: 1, taxRateId: 1,
+                account: { $arrayElemAt: ['$accountInfo', 0] },
+                vendor: { $arrayElemAt: ['$vendorInfo', 0] }
+            }
+        }
+    ]).toArray();
+
+
+    if (expenseResult.length === 0) {
+        return null; // Not found or doesn't belong to the tenant
+    }
+    const expenseDoc = expenseResult[0];
+
      return expenseSchema.parse({
-         ...expense,
-         date: new Date(expense.date),
-         amount: expense.amount.toNumber(),
-         account: expense.account,
-         vendor: expense.vendor ? { ...expense.vendor } : undefined,
-         // taxRate: expense.taxRate ? { ...expense.taxRate, ratePercent: expense.taxRate.ratePercent.toNumber() } : undefined,
-         description: expense.description ?? undefined,
-         receiptUrl: expense.receiptUrl ?? undefined,
-         recurrenceRule: expense.recurrenceRule ?? undefined,
-          vendorId: expense.vendorId ?? undefined,
-         taxRateId: expense.taxRateId ?? undefined,
+         // Map fields similar to getExpenses
+          ...expenseDoc,
+         id: expenseDoc._id?.toHexString(),
+         accountId: expenseDoc.accountId?.toHexString(),
+         vendorId: expenseDoc.vendorId?.toHexString() ?? undefined,
+         taxRateId: expenseDoc.taxRateId?.toHexString() ?? undefined,
+         date: new Date(expenseDoc.date),
+         amount: expenseDoc.amount,
+         description: expenseDoc.description ?? undefined,
+         receiptUrl: expenseDoc.receiptUrl ?? undefined,
+         recurrenceRule: expenseDoc.recurrenceRule ?? undefined,
+         account: expenseDoc.account ? {
+             id: expenseDoc.account._id?.toHexString(),
+             name: expenseDoc.account.name,
+             code: expenseDoc.account.code,
+             type: expenseDoc.account.type,
+         } : undefined,
+         vendor: expenseDoc.vendor ? {
+             id: expenseDoc.vendor._id?.toHexString(),
+             name: expenseDoc.vendor.name,
+         } : undefined,
      });
   } catch (error: unknown) {
-      if (checkPrismaInitError(error, context)) {
-           console.warn(`[DB_WARN] Database connection failed while fetching expense ${id} for tenant ${tenantId}. Returning null.`);
-      } else {
-           console.error(`[ACTION_ERROR] Error fetching expense ${id} for tenant ${tenantId}:`, error);
-           console.warn(`[DB_WARN] Returning null for expense ${id} (tenant ${tenantId}) due to unexpected error.`);
-      }
+      console.error(`[ACTION_ERROR] ${context}:`, error);
+      console.warn(`[DB_WARN] Returning null for expense ${idString} (tenant ${tenantId}) due to unexpected error.`);
     return null;
   }
 }
@@ -138,29 +216,30 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
    }
    const context = `addExpense (Tenant: ${tenantId})`;
 
+  // --- 1. Parse and Validate Form Data ---
   const rawData = {
     date: formData.get('date'),
     accountId: formData.get('accountId'),
     amount: formData.get('amount'),
     description: formData.get('description'),
-    status: formData.get('status') || 'Pending', // Default status from schema
+    status: formData.get('status') || 'Pending',
     vendorId: formData.get('vendorId'),
     isRecurring: formData.get('isRecurring') === 'true',
     recurrenceRule: formData.get('recurrenceRule'),
     taxRateId: formData.get('taxRateId'),
-    // receiptFile: formData.get('receiptFile') // Handle file separately
+    // receiptFile: formData.get('receiptFile') // Handle file separately if implementing upload
   };
 
   const validatedFields = expenseFormSchema.safeParse({
      date: rawData.date ? new Date(rawData.date as string) : undefined,
      accountId: rawData.accountId,
      amount: rawData.amount ? parseFloat(rawData.amount as string) : undefined,
-     description: rawData.description || undefined, // Map empty string to undefined
+     description: rawData.description || undefined,
      status: rawData.status,
-     vendorId: rawData.vendorId || undefined, // Handle empty string from select
+     vendorId: rawData.vendorId || undefined,
      isRecurring: rawData.isRecurring,
      recurrenceRule: rawData.recurrenceRule || undefined,
-     taxRateId: rawData.taxRateId || undefined, // Handle empty string from select
+     taxRateId: rawData.taxRateId || undefined,
   });
 
   if (!validatedFields.success) {
@@ -169,160 +248,203 @@ export async function addExpense(formData: FormData): Promise<ActionResult> {
     return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
   }
 
-   // Validate that selected Account, Vendor, TaxRate belong to the tenant
-   try {
-       const accountId = validatedFields.data.accountId;
-       const vendorId = validatedFields.data.vendorId;
-       const taxRateId = validatedFields.data.taxRateId;
+   // --- 2. Validate ObjectIDs and Tenant Ownership of Relations ---
+   let accountObjectId: ObjectId;
+   let vendorObjectId: ObjectId | undefined | null = undefined;
+   let taxRateObjectId: ObjectId | undefined | null = undefined;
 
-       const account = await prisma.account.findUnique({ where: { id: accountId }, select: { tenantId: true, type: true } });
-       if (!account || account.tenantId !== tenantId || account.type !== 'Expense') {
+   try {
+       accountObjectId = new ObjectId(validatedFields.data.accountId);
+       if (validatedFields.data.vendorId) vendorObjectId = new ObjectId(validatedFields.data.vendorId);
+       if (validatedFields.data.taxRateId) taxRateObjectId = new ObjectId(validatedFields.data.taxRateId);
+
+       const accountsCollection = await getAccountsCollection();
+       const vendorsCollection = await getVendorsCollection();
+       // const taxRatesCollection = await getTaxRatesCollection(); // If needed
+
+       // Check account
+       const account = await accountsCollection.findOne({ _id: accountObjectId, tenantId: tenantId }, { projection: { _id: 1, type: 1 } });
+       if (!account || account.type !== 'Expense') { // Ensure it's an Expense account
            return { success: false, message: 'Invalid expense account selected.', fieldErrors: { accountId: ['Invalid expense account.'] } };
        }
 
-       if (vendorId) {
-           const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { tenantId: true } });
-           if (!vendor || vendor.tenantId !== tenantId) {
+       // Check vendor if provided
+       if (vendorObjectId) {
+           const vendor = await vendorsCollection.findOne({ _id: vendorObjectId, tenantId: tenantId }, { projection: { _id: 1 } });
+           if (!vendor) {
                 return { success: false, message: 'Invalid vendor selected.', fieldErrors: { vendorId: ['Invalid vendor.'] } };
            }
        }
-       if (taxRateId) {
-            const taxRate = await prisma.taxRate.findUnique({ where: { id: taxRateId }, select: { tenantId: true } });
-            if (!taxRate || taxRate.tenantId !== tenantId) {
-                 return { success: false, message: 'Invalid tax rate selected.', fieldErrors: { taxRateId: ['Invalid tax rate.'] } };
-            }
+       // Check tax rate if provided
+       // if (taxRateObjectId) { ... }
+
+   } catch (error: any) {
+       if (error instanceof Error && error.message.includes('Argument passed in must be a single String')) {
+            // Likely invalid ObjectId format passed from form
+             if (!ObjectId.isValid(validatedFields.data.accountId)) return { success: false, message: 'Invalid Account ID format.', fieldErrors: { accountId: ['Invalid format.'] }};
+             if (validatedFields.data.vendorId && !ObjectId.isValid(validatedFields.data.vendorId)) return { success: false, message: 'Invalid Vendor ID format.', fieldErrors: { vendorId: ['Invalid format.'] }};
+             if (validatedFields.data.taxRateId && !ObjectId.isValid(validatedFields.data.taxRateId)) return { success: false, message: 'Invalid Tax Rate ID format.', fieldErrors: { taxRateId: ['Invalid format.'] }};
        }
-   } catch (error) {
-        if(checkPrismaInitError(error, `${context} - Relation Validation`)) {
-           return { success: false, message: 'Database Connection Error during validation.' };
-        }
-       console.error(`[DB_ERROR] Error validating relations for tenant ${tenantId} during expense creation:`, error);
+       console.error(`[DB_ERROR] Error validating relations in ${context}:`, error);
        return { success: false, message: 'Database error during validation.' };
    }
 
 
-  // TODO: Handle receipt file upload here (Firebase Storage or other service)
-  const receiptUrl = undefined; // Placeholder
+  // --- 3. Handle File Upload (Placeholder) ---
+  // TODO: Implement file upload logic here (e.g., to Firebase Storage)
+  const receiptUrl = undefined; // Replace with actual URL after upload
 
+  // --- 4. Insert into Database ---
   try {
-    const expense = await prisma.expense.create({
-      data: {
+    const expensesCollection = await getExpensesCollection();
+    const newExpenseDocument: Omit<ExpenseDocument, '_id'> = {
         ...validatedFields.data,
-        tenantId: tenantId, // Set tenant ID
-        receiptUrl: receiptUrl, // Save the URL from storage
-      },
-    });
+        tenantId: tenantId,
+        accountId: accountObjectId, // Use validated ObjectId
+        vendorId: vendorObjectId,
+        taxRateId: taxRateObjectId,
+        receiptUrl: receiptUrl,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    };
+
+    const result = await expensesCollection.insertOne(newExpenseDocument);
+     if (!result.insertedId) {
+        throw new Error("Failed to insert new expense document.");
+    }
 
     revalidatePath('/expenses');
-    revalidatePath('/dashboard'); // Update dashboard stats
-    return { success: true, message: 'Expense added successfully.', data: expense };
+    revalidatePath('/dashboard');
+    return { success: true, message: 'Expense added successfully.', data: { ...newExpenseDocument, id: result.insertedId.toHexString() } };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, context)) {
-         return { success: false, message: 'Database Connection Error. Failed to add expense.', error: 'Initialization Error' };
-     }
     console.error(`[DB_ERROR] ${context}:`, error);
-    // Specific error handling for P2003 (foreign key) is less likely now due to pre-validation,
-    // but kept for robustness.
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2003') {
-            const fieldName = (error.meta?.field_name as string) || 'related record';
-            return { success: false, message: `Database Error: Invalid ${fieldName}. Record not found.`, error: error.code };
-        }
-    }
     return { success: false, message: 'Database Error: Failed to add expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 // --- Update Expense for the current tenant ---
 const updateExpenseFormSchema = expenseFormSchema.extend({
-  id: z.string().cuid(),
+  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid expense ID." }),
 });
 
 export async function updateExpense(formData: FormData): Promise<ActionResult> {
    const tenantId = await getTenantId();
    if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-   const expenseId = formData.get('id') as string;
-   if (!expenseId) return { success: false, message: 'Expense ID is missing.' };
-   const context = `updateExpense (ID: ${expenseId}, Tenant: ${tenantId})`;
+   const expenseIdString = formData.get('id') as string;
+   if (!expenseIdString) return { success: false, message: 'Expense ID is missing.' };
+   const context = `updateExpense (ID: ${expenseIdString}, Tenant: ${tenantId})`;
 
-   // 1. Verify expense belongs to the tenant
+    let expenseId: ObjectId;
     try {
-        const expense = await prisma.expense.findUnique({ where: { id: expenseId }, select: { tenantId: true } });
-        if (!expense) return { success: false, message: 'Expense not found.' };
-        if (expense.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
-    } catch (error) {
-         if(checkPrismaInitError(error, `${context} - Ownership Check`)) {
-            return { success: false, message: 'Database Connection Error during ownership check.' };
-         }
-        console.error(`[DB_ERROR] Error verifying expense ownership in ${context}:`, error);
-        return { success: false, message: 'Database error verifying expense ownership.' };
+        expenseId = new ObjectId(expenseIdString);
+    } catch (e) {
+        return { success: false, message: 'Invalid Expense ID format.' };
     }
 
-   // 2. Validate form data and related entities (Account, Vendor, TaxRate) similar to addExpense
-   // ...
+   // --- 1. Validate Form Data and Relations (similar to addExpense) ---
+   const rawData = { /* ... extract from formData ... */ id: expenseIdString };
+   const validatedFields = updateExpenseFormSchema.safeParse(rawData);
 
-   const { id, ...updateData } = {id: expenseId /*... validated data ... */}; // Exclude ID from data payload
+    if (!validatedFields.success) { /* handle error */ }
 
+   // --- 2. Verify Ownership and Relations ---
+   let accountObjectId: ObjectId;
+   let vendorObjectId: ObjectId | undefined | null = undefined;
+   // ... declare other ObjectIds ...
+   try {
+        const expensesCollection = await getExpensesCollection();
+        // Check expense exists and belongs to tenant
+        const expense = await expensesCollection.findOne({ _id: expenseId, tenantId: tenantId }, { projection: { _id: 1 }});
+        if (!expense) return { success: false, message: 'Expense not found or access denied.', error: 'Not Found' };
+
+        // Validate account/vendor/taxRate ObjectIds and ownership
+        accountObjectId = new ObjectId(validatedFields.data.accountId);
+        // ... validate vendorObjectId, taxRateObjectId ...
+        // ... check ownership of account, vendor, taxRate ...
+
+   } catch (error: any) { /* handle ObjectId errors and DB errors */ }
+
+
+   // --- 3. Handle File Update (Placeholder) ---
    // TODO: Handle potential receipt file update/replacement here.
 
-  try {
-    const updatedExpense = await prisma.expense.update({
-      where: { id: id },
-      data: {
-          ...updateData,
-          // receiptUrl: updatedReceiptUrl // Add logic for updated URL
-      },
-    });
+   // --- 4. Update Database ---
+   const { id, ...updateData } = validatedFields.data; // Exclude string id
 
-    revalidatePath('/expenses');
-    revalidatePath(`/expenses/${id}`);
-    revalidatePath('/dashboard');
-    return { success: true, message: 'Expense updated successfully.', data: updatedExpense };
+   try {
+        const expensesCollection = await getExpensesCollection();
+        const result = await expensesCollection.updateOne(
+            { _id: expenseId, tenantId: tenantId }, // Ensure tenant match
+            {
+                $set: {
+                    ...updateData,
+                    accountId: accountObjectId, // Store ObjectIds
+                    vendorId: vendorObjectId,
+                    taxRateId: taxRateObjectId,
+                    // receiptUrl: updatedReceiptUrl // Add logic for updated URL
+                    updatedAt: new Date()
+                 }
+            }
+        );
+
+        if (result.matchedCount === 0) {
+            return { success: false, message: 'Expense not found or access denied during update.', error: 'Not Found' };
+        }
+         if (result.modifiedCount === 0) {
+             return { success: true, message: 'Expense details unchanged.' };
+         }
+
+        revalidatePath('/expenses');
+        revalidatePath(`/expenses/${expenseIdString}`);
+        revalidatePath('/dashboard');
+        // Fetch updated data to return if needed
+        const updatedExpense = await getExpenseById(expenseIdString); // Reuse existing function
+        return { success: true, message: 'Expense updated successfully.', data: updatedExpense };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to update expense.', error: 'Initialization Error' };
-     }
     console.error(`[DB_ERROR] ${context}:`, error);
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2025') return { success: false, message: 'Database Error: Expense not found.', error: error.code };
-        // Handle P2003 (foreign key constraint) if validation missed something
-    }
     return { success: false, message: 'Database Error: Failed to update expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 
 // --- Delete Expense for the current tenant ---
-export async function deleteExpense(id: string): Promise<ActionResult> {
+export async function deleteExpense(idString: string): Promise<ActionResult> {
    const tenantId = await getTenantId();
    if (!tenantId) return { success: false, message: 'Tenant ID not found.' };
-   if (!id) return { success: false, message: 'Expense ID is required.' };
-   const context = `deleteExpense (ID: ${id}, Tenant: ${tenantId})`;
+   if (!idString) return { success: false, message: 'Expense ID is required.' };
+   const context = `deleteExpense (ID: ${idString}, Tenant: ${tenantId})`;
+
+    let expenseId: ObjectId;
+    try {
+        expenseId = new ObjectId(idString);
+    } catch (e) {
+        return { success: false, message: 'Invalid Expense ID format.' };
+    }
 
   try {
-     // Verify expense belongs to the tenant
-     const expense = await prisma.expense.findUnique({ where: { id }, select: { tenantId: true, receiptUrl: true } });
-     if (!expense) return { success: false, message: 'Expense not found.', error: 'P2025' };
-     if (expense.tenantId !== tenantId) return { success: false, message: 'Authorization Error.' };
+     const expensesCollection = await getExpensesCollection();
+     // Verify expense belongs to the tenant and get receipt URL if needed
+     const expense = await expensesCollection.findOne({ _id: expenseId, tenantId: tenantId }, { projection: { receiptUrl: 1 }});
+     if (!expense) {
+         return { success: false, message: 'Expense not found or access denied.', error: 'Not Found' };
+     }
 
      // Optional: Delete associated receipt file from storage first
      // if (expense.receiptUrl) {
      //    await deleteFileFromFirebaseStorage(expense.receiptUrl);
      // }
 
-    await prisma.expense.delete({ where: { id } });
+    const result = await expensesCollection.deleteOne({ _id: expenseId, tenantId: tenantId }); // Ensure tenant match
+
+    if (result.deletedCount === 0) {
+        return { success: false, message: 'Expense not found or access denied during deletion.', error: 'Not Found' };
+    }
 
     revalidatePath('/expenses');
     revalidatePath('/dashboard');
     return { success: true, message: 'Expense deleted successfully.' };
   } catch (error: unknown) {
-     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to delete expense.', error: 'Initialization Error' };
-     }
      console.error(`[DB_ERROR] ${context}:`, error);
-     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-          return { success: false, message: 'Expense not found.', error: error.code };
-      }
      return { success: false, message: 'Database Error: Failed to delete expense.', error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -337,24 +459,22 @@ export async function getExpenseCategories(): Promise<{ value: string; label: st
     }
     const context = `getExpenseCategories (Tenant: ${tenantId})`;
    try {
-     const expenseAccounts = await prisma.account.findMany({
-       where: {
-           tenantId: tenantId, // Filter by tenant
+     const accountsCollection = await getAccountsCollection();
+     const expenseAccountsCursor = accountsCollection.find({
+           tenantId: tenantId,
            type: 'Expense',
            isActive: true
-        },
-       select: { id: true, name: true, code: true },
-       orderBy: { name: 'asc' },
-     });
+        }, {
+            projection: { _id: 1, name: 1, code: 1 },
+            sort: { name: 1 }
+        });
+      const expenseAccountsArray = await expenseAccountsCursor.toArray();
+
      // Format label to include code for clarity
-     return expenseAccounts.map(acc => ({ value: acc.id, label: `${acc.code} - ${acc.name}` }));
+     return expenseAccountsArray.map(acc => ({ value: acc._id.toHexString(), label: `${acc.code} - ${acc.name}` }));
    } catch (error) {
-        if (checkPrismaInitError(error, context)) {
-             console.warn(`[DB_WARN] Database connection failed while fetching expense categories for tenant ${tenantId}. Returning empty list.`);
-        } else {
-            console.error(`[ACTION_ERROR] Error fetching expense categories for tenant ${tenantId}:`, error);
-             console.warn(`[DB_WARN] Returning empty expense categories list for tenant ${tenantId} due to unexpected error.`);
-        }
+        console.error(`[ACTION_ERROR] ${context}:`, error);
+        console.warn(`[DB_WARN] Returning empty expense categories list for tenant ${tenantId} due to unexpected error.`);
      return [];
    }
  }

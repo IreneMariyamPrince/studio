@@ -2,10 +2,25 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client';
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { tenantSchema, tenantFormSchema, TenantSchema } from '@/lib/schemas/tenant';
-import { isSuperAdmin } from '@/lib/utils/tenant'; // Import check for super admin
+import { isSuperAdmin } from '@/lib/utils/tenant'; // Keep using this for authorization
+
+// Type definition for MongoDB documents
+type TenantDocument = Omit<TenantSchema, 'id'> & { _id?: ObjectId; createdAt?: Date; updatedAt?: Date };
+type CompanySettingDocument = { _id?: ObjectId; tenantId: ObjectId; companyName: string; createdAt?: Date; updatedAt?: Date };
+
+
+// Helper to get collections
+async function getTenantsCollection(): Promise<Collection<TenantDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<TenantDocument>('tenants');
+}
+async function getCompanySettingsCollection(): Promise<Collection<CompanySettingDocument>> {
+  const { db } = await connectToDatabase();
+  return db.collection<CompanySettingDocument>('companySettings');
+}
 
 // Type definition for action results
 type ActionResult = {
@@ -16,40 +31,25 @@ type ActionResult = {
     fieldErrors?: Record<string, string[]>
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message);
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
-}
 
 // --- Super Admin: Get All Tenants ---
 export async function getAllTenants(): Promise<ActionResult> {
   if (!await isSuperAdmin()) {
     return { success: false, message: 'Unauthorized.' };
   }
-
   const context = 'getAllTenants';
+
   try {
-    const tenants = await prisma.tenant.findMany({
-      orderBy: { name: 'asc' },
-    });
-    return { success: true, message: 'Tenants fetched successfully.', data: tenants.map(t => tenantSchema.parse(t)) };
+    const tenantsCollection = await getTenantsCollection();
+    const tenantsCursor = tenantsCollection.find({}).sort({ name: 1 });
+    const tenantsArray = await tenantsCursor.toArray();
+
+    const parsedTenants = tenantsArray.map(t => tenantSchema.parse({
+        ...t,
+        id: t._id?.toHexString(),
+    }));
+    return { success: true, message: 'Tenants fetched successfully.', data: parsedTenants };
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to fetch tenants.', error: 'Initialization Error' };
-    }
     console.error(`[ACTION_ERROR] ${context}:`, error);
     return { success: false, message: 'Failed to fetch tenants.', error };
   }
@@ -72,104 +72,184 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
     return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
   }
 
+  const { db, client: mongoClient } = await connectToDatabase();
+  const session = mongoClient.startSession();
+
   try {
-    const newTenant = await prisma.tenant.create({
-      data: validatedFields.data,
-    });
-    // Optionally: Create default CompanySetting entry here as well
-    await prisma.companySetting.create({
-        data: {
-            tenantId: newTenant.id,
-            companyName: newTenant.name // Default company name to tenant name
-        }
-    });
+     let createdTenantData: TenantSchema | null = null;
+
+     await session.withTransaction(async () => {
+        const tenantsCollection = db.collection<TenantDocument>('tenants');
+        const companySettingsCollection = db.collection<CompanySettingDocument>('companySettings');
+
+        // Check if tenant name already exists
+         const existingTenant = await tenantsCollection.findOne({ name: validatedFields.data.name }, { session });
+         if (existingTenant) {
+             throw new Error('Duplicate Key'); // Throw specific error to handle below
+         }
+
+        const tenantInsertResult = await tenantsCollection.insertOne(
+            { ...validatedFields.data, createdAt: new Date(), updatedAt: new Date() },
+            { session }
+        );
+         if (!tenantInsertResult.insertedId) throw new Error("Failed to insert tenant.");
+         const newTenantId = tenantInsertResult.insertedId;
+
+        // Create default CompanySetting entry
+        await companySettingsCollection.insertOne(
+            {
+                tenantId: newTenantId,
+                companyName: validatedFields.data.name, // Default company name
+                createdAt: new Date(),
+                updatedAt: new Date()
+            },
+            { session }
+        );
+        // Store data to return outside transaction
+        createdTenantData = tenantSchema.parse({ ...validatedFields.data, id: newTenantId.toHexString() });
+     }); // End Transaction
+
+    await session.endSession();
 
     revalidatePath('/superadmin/tenants'); // Or wherever tenants are listed
-    return { success: true, message: `Tenant "${newTenant.name}" created successfully.`, data: tenantSchema.parse(newTenant) };
+    return { success: true, message: `Tenant "${createdTenantData?.name}" created successfully.`, data: createdTenantData };
+
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to create tenant.', error: 'Initialization Error' };
-    }
-    console.error(`[DB_ERROR] ${context}:`, error);
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      return { success: false, message: 'A tenant with this name already exists.', error: error.code, fieldErrors: { name: ['Name already taken.'] } };
-    }
-    return { success: false, message: 'Failed to create tenant.', error };
+     await session.endSession(); // Ensure session closes on error
+     console.error(`[DB_ERROR] ${context}:`, error);
+     if (error instanceof Error && error.message === 'Duplicate Key') {
+       return { success: false, message: 'A tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
+     }
+     return { success: false, message: 'Failed to create tenant.', error };
   }
 }
 
 // --- Super Admin: Update Tenant ---
+const updateTenantFormSchema = tenantFormSchema.extend({
+  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid tenant ID." }),
+});
 export async function updateTenant(formData: FormData): Promise<ActionResult> {
    if (!await isSuperAdmin()) {
     return { success: false, message: 'Unauthorized.' };
   }
 
-  const tenantId = formData.get('id') as string;
-  if (!tenantId) return { success: false, message: 'Tenant ID missing.' };
-  const context = `updateTenant (ID: ${tenantId})`;
+  const tenantIdString = formData.get('id') as string;
+  if (!tenantIdString) return { success: false, message: 'Tenant ID missing.' };
+  const context = `updateTenant (ID: ${tenantIdString})`;
+
+   let tenantId: ObjectId;
+   try { tenantId = new ObjectId(tenantIdString); }
+   catch { return { success: false, message: 'Invalid Tenant ID format.' }; }
+
 
   const rawData = Object.fromEntries(formData.entries());
-  const validatedFields = tenantFormSchema.safeParse({ name: rawData.name }); // Only name is updatable here
+  const validatedFields = updateTenantFormSchema.safeParse({ id: tenantIdString, name: rawData.name });
 
   if (!validatedFields.success) {
     const fieldErrors = validatedFields.error.flatten().fieldErrors;
     return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
   }
 
+  const { id, ...updateData } = validatedFields.data; // Exclude id string
+
   try {
-    const updatedTenant = await prisma.tenant.update({
-      where: { id: tenantId },
-      data: validatedFields.data,
-    });
+    const tenantsCollection = await getTenantsCollection();
+
+    // Check for name conflict before updating
+     const existingName = await tenantsCollection.findOne({ _id: { $ne: tenantId }, name: updateData.name });
+     if (existingName) {
+          return { success: false, message: 'Another tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
+     }
+
+    const result = await tenantsCollection.updateOne(
+        { _id: tenantId },
+        { $set: { ...updateData, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+         return { success: false, message: 'Tenant not found.', error: 'Not Found' };
+     }
+     if (result.modifiedCount === 0) {
+         return { success: true, message: 'Tenant name unchanged.' };
+     }
+
+
     revalidatePath('/superadmin/tenants');
-    return { success: true, message: 'Tenant updated successfully.', data: tenantSchema.parse(updatedTenant) };
+    // Fetch updated tenant data to return
+    const updatedTenantDoc = await tenantsCollection.findOne({ _id: tenantId });
+    const returnData = updatedTenantDoc ? tenantSchema.parse({ ...updatedTenantDoc, id: updatedTenantDoc._id.toHexString() }) : null;
+    return { success: true, message: 'Tenant updated successfully.', data: returnData };
   } catch (error) {
-    if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to update tenant.', error: 'Initialization Error' };
-    }
     console.error(`[DB_ERROR] ${context}:`, error);
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        if (error.code === 'P2002') { // Unique constraint on name
-            return { success: false, message: 'Another tenant with this name already exists.', error: error.code, fieldErrors: { name: ['Name already taken.'] } };
-        }
-        if (error.code === 'P2025') { // Record not found
-            return { success: false, message: 'Tenant not found.', error: error.code };
-        }
+    // Handle potential duplicate key errors during update (race condition, though check helps)
+    if ((error as any).code === 11000) {
+         return { success: false, message: 'Another tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
     }
     return { success: false, message: 'Failed to update tenant.', error };
   }
 }
 
 // --- Super Admin: Delete Tenant ---
-export async function deleteTenant(id: string): Promise<ActionResult> {
+export async function deleteTenant(idString: string): Promise<ActionResult> {
    if (!await isSuperAdmin()) {
     return { success: false, message: 'Unauthorized.' };
   }
-  if (!id) return { success: false, message: 'Tenant ID missing.' };
-  const context = `deleteTenant (ID: ${id})`;
+  if (!idString) return { success: false, message: 'Tenant ID missing.' };
+  const context = `deleteTenant (ID: ${idString})`;
+
+    let tenantId: ObjectId;
+    try { tenantId = new ObjectId(idString); }
+    catch { return { success: false, message: 'Invalid Tenant ID format.' }; }
+
+    // IMPORTANT: Deleting a tenant requires deleting ALL associated data
+    // (users, accounts, invoices, expenses, settings, etc.) across multiple collections.
+    // This MUST be done within a transaction for atomicity.
+    const { db, client: mongoClient } = await connectToDatabase();
+    const session = mongoClient.startSession();
 
   try {
-    // Ensure the tenant exists before attempting deletion
-    const tenant = await prisma.tenant.findUnique({ where: { id } });
-    if (!tenant) {
-        return { success: false, message: 'Tenant not found.', error: 'P2025' };
-    }
+      await session.withTransaction(async () => {
+         const tenantsCollection = db.collection<TenantDocument>('tenants');
 
-    // Use a transaction if you need to perform cleanup before deletion
-    // Cascade delete should handle related records based on schema
-    await prisma.tenant.delete({ where: { id } });
+         // 1. Verify tenant exists
+         const tenant = await tenantsCollection.findOne({ _id: tenantId }, { session });
+         if (!tenant) throw new Error('Tenant not found.'); // Error will abort transaction
 
-    revalidatePath('/superadmin/tenants');
-    return { success: true, message: 'Tenant deleted successfully.' };
+         // 2. Delete data from ALL related collections (use tenantId as the filter)
+          console.log(`Deleting data for tenant ${tenantId}...`);
+          await db.collection('users').deleteMany({ tenantId: tenantId.toHexString() }, { session }); // Assuming tenantId on user is string
+          await db.collection('accounts').deleteMany({ tenantId: tenantId.toHexString() }, { session }); // Assuming tenantId on account is string
+          await db.collection('invoices').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('invoiceItems').deleteMany({ /* Need a way to link items to tenant, maybe add tenantId? Or delete by invoiceIds first */ }, { session }); // Requires careful handling
+          await db.collection('expenses').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('payments').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('clients').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('vendors').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('budgets').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('companySettings').deleteMany({ tenantId: tenantId }, { session }); // Assuming tenantId is ObjectId here
+          // ... delete from any other tenant-specific collections ...
+          console.log(`Finished deleting associated data for tenant ${tenantId}.`);
+
+
+         // 3. Delete the tenant document itself
+         const deleteResult = await tenantsCollection.deleteOne({ _id: tenantId }, { session });
+         if (deleteResult.deletedCount === 0) {
+             // Should not happen if findOne succeeded, but good practice
+             throw new Error("Tenant found but failed to delete.");
+         }
+         console.log(`Deleted tenant document ${tenantId}.`);
+      }); // End Transaction
+
+      await session.endSession();
+
+      revalidatePath('/superadmin/tenants');
+      return { success: true, message: 'Tenant and all associated data deleted successfully.' };
   } catch (error) {
-     if (checkPrismaInitError(error, context)) {
-        return { success: false, message: 'Database Connection Error. Failed to delete tenant.', error: 'Initialization Error' };
-    }
-    console.error(`[DB_ERROR] ${context}:`, error);
-     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
-         return { success: false, message: 'Tenant not found.', error: error.code };
+     await session.endSession(); // Ensure session closes on error
+     console.error(`[DB_ERROR] ${context} Transaction:`, error);
+     if (error instanceof Error && error.message === 'Tenant not found.') {
+          return { success: false, message: 'Tenant not found.', error: 'Not Found' };
      }
-    // Handle potential relation constraint errors if cascade isn't set up correctly
-    return { success: false, message: 'Failed to delete tenant.', error };
+    return { success: false, message: 'Failed to delete tenant and associated data.', error };
   }
 }

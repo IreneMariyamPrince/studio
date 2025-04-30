@@ -1,10 +1,15 @@
 
 'use server';
 
-import prisma from '@/lib/prisma';
-import { Prisma } from '@prisma/client'; // Ensure Prisma namespace is imported
+import { Collection, ObjectId, WithId } from 'mongodb';
+import { connectToDatabase } from '@/lib/mongodb';
 import { endOfMonth, startOfMonth } from 'date-fns';
-import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID
+import { getTenantId } from '@/lib/utils/tenant';
+import type { ExpenseSchema } from '@/lib/schemas/expense';
+import type { InvoiceSchema } from '@/lib/schemas/invoice';
+
+// Define interfaces matching MongoDB document structures if needed
+// e.g., type ExpenseDocument = { ... }
 
 export interface DashboardStats {
   totalExpensesThisMonth: number;
@@ -24,25 +29,29 @@ const defaultStats: DashboardStats = {
     pendingInvoicesAmount: 0,
 };
 
-// Flag to prevent spamming the console with the same libssl error
-let libsslErrorLogged = false;
-let prismaInitializationFailed = false; // Flag to track if *any* init error occurred
-
-// Helper function to check and log Prisma init errors
-// Returns true if it WAS an initialization error, false otherwise
-function checkPrismaInitError(error: unknown, context: string): boolean {
-     if (error instanceof Prisma.PrismaClientInitializationError) {
-         prismaInitializationFailed = true; // Set the global flag
-         console.error(`[ACTION_ERROR] Prisma Initialization Error in ${context}:`, error.message); // Log the specific context and message
-         // Log the more detailed environment message only once
-         if (error.message.includes('libssl') && !libsslErrorLogged) {
-             console.error("DATABASE CONNECTION FAILED: Prisma cannot find the required `libssl` system library (e.g., libssl.so.1.1). This is an ENVIRONMENT ISSUE. Please ensure OpenSSL 1.1 or 3 (check Prisma version compatibility) is installed and accessible in your deployment environment.");
-             libsslErrorLogged = true; // Prevent repeated logging of the detailed message
-         }
-         return true; // Indicate that it was an initialization error
-     }
-     return false; // Not an initialization error
+// Helper to get collections
+async function getExpensesCollection(): Promise<Collection> {
+    const { db } = await connectToDatabase();
+    return db.collection('expenses');
 }
+async function getInvoicesCollection(): Promise<Collection> {
+    const { db } = await connectToDatabase();
+    return db.collection('invoices');
+}
+async function getAccountsCollection(): Promise<Collection> {
+    const { db } = await connectToDatabase();
+    return db.collection('accounts');
+}
+
+// Flag to track if *any* DB error occurred during stat calculation
+let dbErrorOccurred = false;
+
+// Helper function to log errors and set the flag
+function handleDbError(error: unknown, context: string) {
+    dbErrorOccurred = true;
+    console.error(`[DB_ERROR] Error in ${context}:`, error);
+}
+
 
 // --- Get Dashboard Stats for the current tenant ---
 export async function getDashboardStats(): Promise<DashboardStats> {
@@ -52,10 +61,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       return defaultStats; // Return default stats if tenant is not identified
   }
 
-  // Reset flags for this request
-  prismaInitializationFailed = false;
-  // libsslErrorLogged can stay true once logged for the lifetime of the server process
-
+  dbErrorOccurred = false; // Reset flag for this request
   let stats: DashboardStats = { ...defaultStats }; // Start with default stats
 
   try {
@@ -67,84 +73,90 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
     const whereTenantClause = { tenantId: tenantId }; // Base clause for filtering by tenant
 
-    // Use Promise.allSettled to handle potential errors in individual queries gracefully
+    const expensesCollection = await getExpensesCollection();
+    const invoicesCollection = await getInvoicesCollection();
+    const accountsCollection = await getAccountsCollection();
+
+    // Use Promise.allSettled to allow individual queries to fail without stopping others
     const results = await Promise.allSettled([
-      // 1. Expenses This Month
-      prisma.expense.aggregate({
-        _sum: { amount: true },
-        where: { ...whereTenantClause, date: { gte: startOfCurrentMonth, lte: endOfCurrentMonth } },
-      }),
-      // 2. Expenses Last Month
-      prisma.expense.aggregate({
-        _sum: { amount: true },
-        where: { ...whereTenantClause, date: { gte: startOfLastMonth, lte: endOfLastMonth } },
-      }),
-      // 3. Pending Invoices Count & Amount
-      prisma.invoice.aggregate({
-        _count: { id: true },
-        _sum: { total: true },
-        where: { ...whereTenantClause, status: 'Pending' },
-      }),
-      // 4. Open Expense Reports Count
-      prisma.expense.aggregate({
-        _count: { id: true },
-        where: { ...whereTenantClause, status: 'Pending' },
-      }),
+      // 1. Expenses This Month Aggregate
+      expensesCollection.aggregate([
+        { $match: { ...whereTenantClause, date: { $gte: startOfCurrentMonth, $lte: endOfCurrentMonth } } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]).toArray(),
+      // 2. Expenses Last Month Aggregate
+      expensesCollection.aggregate([
+        { $match: { ...whereTenantClause, date: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]).toArray(),
+      // 3. Pending Invoices Count & Amount Aggregate
+      invoicesCollection.aggregate([
+        { $match: { ...whereTenantClause, status: 'Pending' } },
+        { $group: { _id: null, count: { $sum: 1 }, totalAmount: { $sum: "$total" } } }
+      ]).toArray(),
+      // 4. Open Expense Reports Count (Pending Expenses)
+       expensesCollection.countDocuments({ ...whereTenantClause, status: 'Pending' }),
       // 5. Active Accounts Count
-      prisma.account.count({ where: { ...whereTenantClause, isActive: true }}), // Count only active accounts for this tenant
+      accountsCollection.countDocuments({ ...whereTenantClause, isActive: true }),
     ]);
 
-    // Check each result for Prisma initialization errors *after* all promises settle
-    results.forEach((result, index) => {
-        if (result.status === 'rejected') {
-            const context = `getDashboardStats query ${index + 1} (Tenant: ${tenantId})`;
-            // Use the helper to check and log appropriately
-            const isInitError = checkPrismaInitError(result.reason, context);
-            if (!isInitError) {
-                 // Log other non-initialization errors
-                 console.error(`[ACTION_ERROR] Error in ${context}:`, result.reason);
-            }
-        }
-    });
+    // Process results, checking for rejections
+    const expensesThisMonthRes = results[0];
+    if (expensesThisMonthRes.status === 'fulfilled' && expensesThisMonthRes.value.length > 0) {
+        stats.totalExpensesThisMonth = expensesThisMonthRes.value[0].total ?? 0;
+    } else if (expensesThisMonthRes.status === 'rejected') {
+        handleDbError(expensesThisMonthRes.reason, 'Dashboard Stats (Expenses This Month)');
+    }
 
-     // If a critical DB connection error occurred in *any* of the queries, log a warning and return defaults.
-     if (prismaInitializationFailed) {
-         console.warn(`[DB_WARN] Database connection failed during dashboard stat calculation for tenant ${tenantId}. Returning default stats.`);
-         return defaultStats;
+    const expensesLastMonthRes = results[1];
+    let totalExpensesLastMonth = 0;
+    if (expensesLastMonthRes.status === 'fulfilled' && expensesLastMonthRes.value.length > 0) {
+        totalExpensesLastMonth = expensesLastMonthRes.value[0].total ?? 0;
+    } else if (expensesLastMonthRes.status === 'rejected') {
+        handleDbError(expensesLastMonthRes.reason, 'Dashboard Stats (Expenses Last Month)');
+    }
+
+    const pendingInvoicesRes = results[2];
+     if (pendingInvoicesRes.status === 'fulfilled' && pendingInvoicesRes.value.length > 0) {
+        stats.pendingInvoicesCount = pendingInvoicesRes.value[0].count ?? 0;
+        stats.pendingInvoicesAmount = pendingInvoicesRes.value[0].totalAmount ?? 0;
+     } else if (pendingInvoicesRes.status === 'rejected') {
+        handleDbError(pendingInvoicesRes.reason, 'Dashboard Stats (Pending Invoices)');
      }
 
-    // Calculate stats from successful results, default to 0 if a query failed for other reasons
-    const expensesThisMonthRes = results[0];
-    const expensesLastMonthRes = results[1];
-    const pendingInvoicesRes = results[2];
-    const openExpensesRes = results[3];
+     const openExpensesRes = results[3];
+     if (openExpensesRes.status === 'fulfilled') {
+         stats.openExpenseReportsCount = openExpensesRes.value ?? 0;
+     } else if (openExpensesRes.status === 'rejected') {
+        handleDbError(openExpensesRes.reason, 'Dashboard Stats (Open Expenses Count)');
+     }
+
     const accountsCountRes = results[4];
+    if (accountsCountRes.status === 'fulfilled') {
+        stats.activeAccountsCount = accountsCountRes.value ?? 0;
+    } else if (accountsCountRes.status === 'rejected') {
+        handleDbError(accountsCountRes.reason, 'Dashboard Stats (Active Accounts Count)');
+    }
 
-    stats.totalExpensesThisMonth = expensesThisMonthRes.status === 'fulfilled' ? expensesThisMonthRes.value._sum.amount?.toNumber() ?? 0 : 0;
-    const totalExpensesLastMonth = expensesLastMonthRes.status === 'fulfilled' ? expensesLastMonthRes.value._sum.amount?.toNumber() ?? 0 : 0;
-    stats.pendingInvoicesCount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._count.id ?? 0 : 0;
-    stats.pendingInvoicesAmount = pendingInvoicesRes.status === 'fulfilled' ? pendingInvoicesRes.value._sum.total?.toNumber() ?? 0 : 0;
-    stats.openExpenseReportsCount = openExpensesRes.status === 'fulfilled' ? openExpensesRes.value._count.id ?? 0 : 0;
-    stats.activeAccountsCount = accountsCountRes.status === 'fulfilled' ? accountsCountRes.value ?? 0 : 0;
+     // Calculate percentage change only if both values were successfully fetched
+     if (expensesThisMonthRes.status === 'fulfilled' && expensesLastMonthRes.status === 'fulfilled') {
+         if (totalExpensesLastMonth > 0) {
+             stats.expenseChangePercent = ((stats.totalExpensesThisMonth - totalExpensesLastMonth) / totalExpensesLastMonth) * 100;
+         } else if (stats.totalExpensesThisMonth > 0) {
+             stats.expenseChangePercent = 100; // Indicate growth if last month was 0
+         } // else remains null if both are 0
+     }
 
-     // Calculate percentage change
-     let expenseChangePercent: number | null = null;
-     if (totalExpensesLastMonth > 0) {
-       expenseChangePercent = ((stats.totalExpensesThisMonth - totalExpensesLastMonth) / totalExpensesLastMonth) * 100;
-     } else if (stats.totalExpensesThisMonth > 0) {
-        expenseChangePercent = 100; // Indicate high growth if last month was 0
-     } // else remains null if both are 0
-    stats.expenseChangePercent = expenseChangePercent;
+    // If any DB error occurred, log a warning
+    if (dbErrorOccurred) {
+        console.warn(`[DB_WARN] One or more database errors occurred while calculating dashboard stats for tenant ${tenantId}. Stats may be incomplete.`);
+    }
 
     return stats;
 
   } catch (error) {
      // Catch any unexpected top-level errors (less likely with Promise.allSettled)
-     const context = `getDashboardStats top-level (Tenant: ${tenantId})`;
-     if (!checkPrismaInitError(error, context)) {
-         // Log errors that are not init errors
-         console.error(`[ACTION_ERROR] Unexpected top-level error in ${context}:`, error);
-     }
+     console.error(`[ACTION_ERROR] Unexpected top-level error in getDashboardStats (Tenant: ${tenantId}):`, error);
      console.warn(`[DB_WARN] Unexpected error fetching dashboard stats for tenant ${tenantId}. Returning default stats.`);
      return defaultStats; // Return defaults on any top-level error
   }
@@ -152,7 +164,19 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 
 // --- Fetch Recent Data (scoped by tenant) ---
 
-export async function getRecentExpenses(limit = 5) {
+// Define interfaces for the shape of data returned, including relations
+interface RecentExpense extends Omit<ExpenseSchema, 'account' | 'id'> {
+    _id: ObjectId;
+    id?: string; // Add string id after conversion
+    account: { name: string }; // Only include needed fields
+}
+interface RecentInvoice extends Omit<InvoiceSchema, 'client' | 'id'> {
+     _id: ObjectId;
+     id?: string; // Add string id after conversion
+     client: { name: string }; // Only include needed fields
+}
+
+export async function getRecentExpenses(limit = 5): Promise<Omit<RecentExpense,'_id'>[]> {
     const tenantId = await getTenantId();
     if (!tenantId) {
       console.error("[ACTION_ERROR] Tenant ID not found in getRecentExpenses.");
@@ -161,29 +185,51 @@ export async function getRecentExpenses(limit = 5) {
     const context = `getRecentExpenses (Tenant: ${tenantId})`;
 
    try {
-     const expenses = await prisma.expense.findMany({
-       take: limit,
-       where: { tenantId: tenantId }, // Filter by tenant
-       orderBy: { date: 'desc' },
-       include: { account: { select: { name: true } } }, // Include account name
-     });
-     // Parse Decimal to number for amount
-     return expenses.map(exp => ({
+     const expensesCollection = await getExpensesCollection();
+     // Use aggregation to join with accounts and select only the name
+     const expensesCursor = expensesCollection.aggregate([
+         { $match: { tenantId: tenantId } },
+         { $sort: { date: -1 } },
+         { $limit: limit },
+         {
+             $lookup: {
+                 from: 'accounts',
+                 localField: 'accountId',
+                 foreignField: '_id',
+                 as: 'accountInfo'
+             }
+         },
+         { $unwind: { path: '$accountInfo', preserveNullAndEmptyArrays: true } }, // Keep expense even if account lookup fails
+         {
+             $project: { // Reshape the output document
+                 _id: 1,
+                 date: 1,
+                 amount: 1,
+                 description: 1,
+                 status: 1,
+                 // etc. - include other necessary fields from ExpenseSchema
+                 'account.name': '$accountInfo.name' // Project nested account name
+             }
+         }
+     ]);
+
+     const expensesArray = await expensesCursor.toArray() as RecentExpense[];
+
+     // Map MongoDB document to desired return structure
+     return expensesArray.map(exp => ({
          ...exp,
-         amount: exp.amount.toNumber()
+         id: exp._id.toHexString(), // Convert ObjectId to string id
+         // Ensure account exists before accessing name
+         account: exp.account ? { name: exp.account.name } : { name: 'Unknown Account' },
      }));
    } catch (error) {
-        if(checkPrismaInitError(error, context)) {
-            console.warn(`[DB_WARN] Database connection failed while fetching recent expenses for tenant ${tenantId}. Returning empty list.`);
-        } else {
-             console.error(`[ACTION_ERROR] Error fetching recent expenses for tenant ${tenantId}:`, error);
-             console.warn(`[DB_WARN] Returning empty recent expenses list for tenant ${tenantId} due to unexpected error.`);
-        }
+       handleDbError(error, context);
+       console.warn(`[DB_WARN] Returning empty recent expenses list for tenant ${tenantId} due to unexpected error.`);
        return []; // Return empty array on any error
    }
 }
 
-export async function getRecentInvoices(limit = 5) {
+export async function getRecentInvoices(limit = 5): Promise<Omit<RecentInvoice, '_id'>[]> {
     const tenantId = await getTenantId();
     if (!tenantId) {
       console.error("[ACTION_ERROR] Tenant ID not found in getRecentInvoices.");
@@ -192,24 +238,45 @@ export async function getRecentInvoices(limit = 5) {
     const context = `getRecentInvoices (Tenant: ${tenantId})`;
 
    try {
-     const invoices = await prisma.invoice.findMany({
-       take: limit,
-       where: { tenantId: tenantId }, // Filter by tenant
-       orderBy: { issueDate: 'desc' },
-       include: { client: { select: { name: true } } }, // Include client name
-     });
-      // Parse Decimal to number for total
-     return invoices.map(inv => ({
+     const invoicesCollection = await getInvoicesCollection();
+      // Use aggregation to join with clients and select only the name
+     const invoicesCursor = invoicesCollection.aggregate([
+         { $match: { tenantId: tenantId } },
+         { $sort: { issueDate: -1 } },
+         { $limit: limit },
+          {
+             $lookup: {
+                 from: 'clients',
+                 localField: 'clientId',
+                 foreignField: '_id',
+                 as: 'clientInfo'
+             }
+         },
+         { $unwind: { path: '$clientInfo', preserveNullAndEmptyArrays: true } },
+         {
+             $project: {
+                 _id: 1,
+                 invoiceNumber: 1,
+                 status: 1,
+                 total: 1,
+                 issueDate: 1,
+                 dueDate: 1,
+                 // etc. - include other necessary fields from InvoiceSchema
+                 'client.name': '$clientInfo.name'
+             }
+         }
+     ]);
+      const invoicesArray = await invoicesCursor.toArray() as RecentInvoice[];
+
+      // Map MongoDB document to desired return structure
+     return invoicesArray.map(inv => ({
         ...inv,
-        total: inv.total.toNumber()
+        id: inv._id.toHexString(), // Convert ObjectId to string id
+         client: inv.client ? { name: inv.client.name } : { name: 'Unknown Client' },
     }));
    } catch (error) {
-        if(checkPrismaInitError(error, context)) {
-            console.warn(`[DB_WARN] Database connection failed while fetching recent invoices for tenant ${tenantId}. Returning empty list.`);
-        } else {
-            console.error(`[ACTION_ERROR] Error fetching recent invoices for tenant ${tenantId}:`, error);
-             console.warn(`[DB_WARN] Returning empty recent invoices list for tenant ${tenantId} due to unexpected error.`);
-       }
+       handleDbError(error, context);
+       console.warn(`[DB_WARN] Returning empty recent invoices list for tenant ${tenantId} due to unexpected error.`);
       return []; // Return empty array on any error
    }
 }
