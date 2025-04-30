@@ -1,15 +1,18 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const bankAccountSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  // id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
   name: z.string().min(1, { message: "Account name is required." }),
   accountNumber: z.string().optional(), // Store masked or partial for security
   bankName: z.string().optional(),
   balance: z.coerce.number().optional().default(0), // Handled by server actions/DB
   currency: z.string().default("USD"),
   isDefault: z.boolean().optional().default(false),
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 });
 
 export type BankAccountSchema = z.infer<typeof bankAccountSchema>;

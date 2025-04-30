@@ -1,15 +1,15 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { z } from 'zod';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoError, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
-import { accountSchema, AccountSchema, accountFormSchema } from '@/lib/schemas/account'; // Assuming schema definitions remain similar
-import { getTenantId } from '@/lib/utils/tenant'; // Helper to get tenant ID (implement this)
+import { accountSchema, AccountSchema, accountFormSchema } from '@/lib/schemas/account';
+import { getTenantId } from '@/lib/utils/tenant';
+import { z } from 'zod';
 
-// Type definition for MongoDB documents matching AccountSchema
-// Note: MongoDB uses _id, not id
+// Type definition for MongoDB documents
 type AccountDocument = Omit<AccountSchema, 'id'> & { _id?: ObjectId; tenantId: string; createdAt?: Date; updatedAt?: Date };
 
 // Helper to get the accounts collection
@@ -41,14 +41,20 @@ export async function getAccounts(): Promise<AccountSchema[]> {
     const accountsCursor = accountsCollection.find({ tenantId: tenantId }).sort({ code: 1 });
     const accountsArray = await accountsCursor.toArray();
 
-    // Map MongoDB document to schema, converting _id to id
-    return accountsArray.map(doc => accountSchema.parse({
-        ...doc,
-        id: doc._id?.toHexString(), // Convert ObjectId to string id
-        balance: doc.balance ?? 0, // Ensure balance has a default
-        // Ensure optional fields are handled if necessary
-        description: doc.description ?? undefined,
-    }));
+    // Map MongoDB document to schema, converting dates to strings first
+    return accountsArray.map(doc => {
+         // Serialize dates before parsing
+         const serializableDoc = {
+             ...doc,
+             id: doc._id?.toHexString(),
+             balance: doc.balance ?? 0,
+             description: doc.description ?? undefined,
+             isActive: doc.isActive ?? true,
+             createdAt: doc.createdAt?.toISOString(), // Convert Date to ISO string
+             updatedAt: doc.updatedAt?.toISOString(), // Convert Date to ISO string
+         };
+         return accountSchema.parse(serializableDoc);
+    });
   } catch (error: unknown) {
      console.error(`[ACTION_ERROR] ${context}:`, error);
      console.warn(`[DB_WARN] Returning empty accounts list for tenant ${tenantId} due to unexpected error.`);
@@ -118,7 +124,12 @@ export async function addAccount(formData: FormData): Promise<ActionResult> {
 
   } catch (error: unknown) {
     console.error(`[DB_ERROR] ${context}:`, error);
-    // More specific MongoDB error handling could be added here if needed
+     if (error instanceof MongoServerError && error.code === 11000) { // Check for MongoDB duplicate key error
+        return {
+            success: false, message: `Database Error: Account code "${code}" already exists for this tenant.`, error: 'Duplicate Key',
+            fieldErrors: { code: [`Account code "${code}" already exists for this tenant.`] }
+        };
+     }
     return { success: false, message: 'Database Error: Failed to create account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -203,6 +214,12 @@ export async function updateAccount(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Account "${updateData.name}" (Code: ${updateData.code}) updated successfully.` };
   } catch (error: unknown) {
      console.error(`[DB_ERROR] ${context}:`, error);
+      if (error instanceof MongoServerError && error.code === 11000) { // Check for MongoDB duplicate key error
+        return {
+            success: false, message: `Database Error: Account code "${updateData.code}" is already in use by this tenant.`, error: 'Duplicate Key',
+            fieldErrors: { code: [`Account code "${updateData.code}" is already in use by this tenant.`] }
+        };
+     }
      return { success: false, message: 'Database Error: Failed to update account.', error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -291,13 +308,18 @@ export async function getAccountById(idString: string): Promise<AccountSchema | 
         return null; // Return null if not found or doesn't belong to tenant
     }
 
+     // Serialize dates before parsing
+     const serializableDoc = {
+         ...accountDoc,
+         id: accountDoc._id.toHexString(), // Map _id to id
+         balance: accountDoc.balance ?? 0,
+         description: accountDoc.description ?? undefined,
+         isActive: accountDoc.isActive ?? true,
+         createdAt: accountDoc.createdAt?.toISOString(),
+         updatedAt: accountDoc.updatedAt?.toISOString(),
+     };
     // Parse the fetched data using the main schema
-    return accountSchema.parse({
-        ...accountDoc,
-        id: accountDoc._id.toHexString(), // Map _id to id
-        balance: accountDoc.balance ?? 0,
-        description: accountDoc.description ?? undefined,
-    });
+    return accountSchema.parse(serializableDoc);
   } catch (error: unknown) {
        console.error(`[ACTION_ERROR] ${context}:`, error);
        console.warn(`[DB_WARN] Returning null for account ${idString} (tenant ${tenantId}) due to unexpected error.`);

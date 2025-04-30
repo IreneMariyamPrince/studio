@@ -1,3 +1,4 @@
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -15,7 +16,7 @@ import {
 import { getAccounts } from '@/lib/actions/accounts';
 import type { AccountSchema } from '@/lib/schemas/account';
 import { AddAccountDialog } from './_components/add-account-dialog';
-import { EditAccountDialog } from './_components/edit-account-dialog';
+import { EditAccountDialog, type SerializableAccountData } from './_components/edit-account-dialog';
 import { DeleteAccountDialog } from './_components/delete-account-dialog';
 import 'server-only';
 
@@ -58,39 +59,56 @@ export default async function ChartOfAccountsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {accounts.map((account) => (
-                <TableRow key={account.id}>
-                  <TableCell className="font-medium">{account.code}</TableCell>
-                  <TableCell>{account.name}</TableCell>
-                  <TableCell>{account.type}</TableCell>
-                  <TableCell className="max-w-[200px] truncate" title={account.description}>{account.description || '-'}</TableCell>
-                   <TableCell>
-                     <Badge variant={account.isActive ? 'default' : 'outline'}>
-                         {account.isActive ? 'Active' : 'Inactive'}
-                     </Badge>
-                   </TableCell>
-                   <TableCell className="text-right">
-                     {/* Show balance only for relevant account types */}
-                     {['Asset', 'Liability', 'Equity'].includes(account.type)
-                       ? formatCurrency(account.balance)
-                       : '-'}
-                   </TableCell>
-                  <TableCell className="text-right space-x-1">
-                    <EditAccountDialog account={account}>
-                       <Button variant="ghost" size="icon" className="h-8 w-8">
-                         <Edit className="h-4 w-4" />
-                         <span className="sr-only">Edit Account</span>
-                       </Button>
-                     </EditAccountDialog>
-                     <DeleteAccountDialog accountId={account.id!} accountName={account.name}>
-                       <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
-                         <Trash2 className="h-4 w-4" />
-                         <span className="sr-only">Delete Account</span>
-                       </Button>
-                     </DeleteAccountDialog>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {accounts.map((account) => {
+                 // Prepare serializable data to pass to the client component
+                 const serializableAccount: SerializableAccountData = {
+                     id: account.id!, // Ensure ID is a string
+                     code: account.code,
+                     name: account.name,
+                     type: account.type,
+                     description: account.description,
+                     balance: account.balance,
+                     isActive: account.isActive,
+                     // Convert dates to ISO strings
+                     createdAt: account.createdAt?.toISOString(),
+                     updatedAt: account.updatedAt?.toISOString(),
+                 };
+
+                return (
+                    <TableRow key={serializableAccount.id}>
+                      <TableCell className="font-medium">{serializableAccount.code}</TableCell>
+                      <TableCell>{serializableAccount.name}</TableCell>
+                      <TableCell>{serializableAccount.type}</TableCell>
+                      <TableCell className="max-w-[200px] truncate" title={serializableAccount.description}>{serializableAccount.description || '-'}</TableCell>
+                       <TableCell>
+                         <Badge variant={serializableAccount.isActive ? 'default' : 'outline'}>
+                             {serializableAccount.isActive ? 'Active' : 'Inactive'}
+                         </Badge>
+                       </TableCell>
+                       <TableCell className="text-right">
+                         {/* Show balance only for relevant account types */}
+                         {['Asset', 'Liability', 'Equity'].includes(serializableAccount.type)
+                           ? formatCurrency(serializableAccount.balance)
+                           : '-'}
+                       </TableCell>
+                      <TableCell className="text-right space-x-1">
+                        {/* Pass the serializable data to the client component */}
+                        <EditAccountDialog account={serializableAccount}>
+                           <Button variant="ghost" size="icon" className="h-8 w-8">
+                             <Edit className="h-4 w-4" />
+                             <span className="sr-only">Edit Account</span>
+                           </Button>
+                         </EditAccountDialog>
+                         <DeleteAccountDialog accountId={serializableAccount.id!} accountName={serializableAccount.name}>
+                           <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
+                             <Trash2 className="h-4 w-4" />
+                             <span className="sr-only">Delete Account</span>
+                           </Button>
+                         </DeleteAccountDialog>
+                      </TableCell>
+                    </TableRow>
+                );
+            })}
               {accounts.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={7} className="h-24 text-center"> {/* Increased colspan */}
@@ -105,3 +123,4 @@ export default async function ChartOfAccountsPage() {
     </DashboardLayout>
   );
 }
+

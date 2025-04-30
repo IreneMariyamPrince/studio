@@ -1,13 +1,16 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const taxRateSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  // id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().refine((val) => ObjectId.isValid(val), { message: "Invalid ObjectId" }).optional(), // Validate as ObjectId string
   name: z.string().min(1, { message: "Tax rate name is required." }), // e.g., "VAT", "GST"
   ratePercent: z.coerce.number().nonnegative({ message: "Rate must be non-negative." }).max(100, { message: "Rate cannot exceed 100." }), // e.g., 20.00 for 20%
   description: z.string().optional(),
   isDefault: z.boolean().optional().default(false),
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 });
 
 export type TaxRateSchema = z.infer<typeof taxRateSchema>;

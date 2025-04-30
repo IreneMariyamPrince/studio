@@ -1,3 +1,4 @@
+
 'use client';
 
 import type { ReactNode } from 'react';
@@ -19,9 +20,17 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { clientFormSchema } from '@/lib/schemas/client'; // Import the form schema
 
+// Define a type for the serializable client data passed from the server
+export type SerializableClientData = Omit<ClientSchema, 'createdAt' | 'updatedAt'> & {
+    id: string; // Ensure ID is string
+    createdAt?: string; // Date as string
+    updatedAt?: string; // Date as string
+};
+
+
 interface EditClientDialogProps {
   children: ReactNode; // Trigger element (e.g., Edit button)
-  client: ClientSchema; // Pass the full ClientSchema for initial data
+  client: SerializableClientData; // Use the serializable type
 }
 
 export function EditClientDialog({ children, client }: EditClientDialogProps) {
@@ -29,7 +38,7 @@ export function EditClientDialog({ children, client }: EditClientDialogProps) {
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
 
-  // Prepare default values for the form schema from the full client schema
+  // Prepare default values for the form schema from the serializable client schema
    const defaultFormValues: ClientFormSchema = {
        name: client.name,
        email: client.email ?? '', // Ensure string or empty string
@@ -64,7 +73,7 @@ export function EditClientDialog({ children, client }: EditClientDialogProps) {
   const onSubmit = (data: ClientFormSchema) => {
      form.clearErrors();
      const formData = new FormData();
-     formData.append('id', client.id!); // Add the ID for the update action
+     formData.append('id', client.id); // Add the ID for the update action
 
      Object.entries(data).forEach(([key, value]) => {
        if (value !== undefined && value !== null && value !== '') { // Append non-empty strings/numbers
@@ -127,4 +136,3 @@ export function EditClientDialog({ children, client }: EditClientDialogProps) {
     </Dialog>
   );
 }
-

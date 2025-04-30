@@ -1,4 +1,5 @@
 
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -71,7 +72,7 @@ export default async function InvoicesPage() {
               {invoices.map((invoice) => (
                 <TableRow key={invoice.id}>
                   <TableCell className="font-medium">{invoice.invoiceNumber}</TableCell>
-                  <TableCell>{invoice.client.name}</TableCell> {/* Access nested client name */}
+                  <TableCell>{invoice.client?.name ?? 'N/A'}</TableCell> {/* Access nested client name */}
                   <TableCell>{format(new Date(invoice.issueDate), 'PP')}</TableCell>
                   <TableCell>{format(new Date(invoice.dueDate), 'PP')}</TableCell>
                   <TableCell>
@@ -79,7 +80,7 @@ export default async function InvoicesPage() {
                        {invoice.status}
                      </Badge>
                   </TableCell>
-                  <TableCell className="text-right">{formatCurrency(invoice.total)}</TableCell>
+                   <TableCell className="text-right">{formatCurrency(invoice.total!)}</TableCell> {/* Use total from schema */}
                   <TableCell className="text-right space-x-1">
                     {/* Link to View Invoice Page (create later) */}
                     <Button asChild variant="ghost" size="icon" className="h-8 w-8">

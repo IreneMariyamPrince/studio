@@ -1,4 +1,5 @@
 
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -15,7 +16,7 @@ import {
 import { getClients } from '@/lib/actions/clients'; // Adjust path if needed
 import type { ClientSchema } from '@/lib/schemas/client';
 import { AddClientDialog } from './_components/add-client-dialog';
-import { EditClientDialog } from './_components/edit-client-dialog';
+import { EditClientDialog, type SerializableClientData } from './_components/edit-client-dialog';
 import { DeleteClientDialog } from './_components/delete-client-dialog';
 import 'server-only';
 
@@ -57,29 +58,44 @@ export default async function ClientsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {clients.map((client) => (
-                <TableRow key={client.id}>
-                  <TableCell className="font-medium">{client.name}</TableCell>
-                  <TableCell>{client.email || '-'}</TableCell>
-                  <TableCell>{client.phone || '-'}</TableCell>
-                  <TableCell>{client.paymentTerms || '-'}</TableCell>
-                  <TableCell className="text-right">{formatCurrency(client.balanceDue)}</TableCell>
-                  <TableCell className="text-right space-x-1">
-                    <EditClientDialog client={client}>
-                       <Button variant="ghost" size="icon" className="h-8 w-8">
-                         <Edit className="h-4 w-4" />
-                         <span className="sr-only">Edit Client</span>
-                       </Button>
-                     </EditClientDialog>
-                     <DeleteClientDialog clientId={client.id!} clientName={client.name}>
-                       <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
-                         <Trash2 className="h-4 w-4" />
-                         <span className="sr-only">Delete Client</span>
-                       </Button>
-                     </DeleteClientDialog>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {clients.map((client) => {
+                 // Serialize data for the client component
+                 const serializableClient: SerializableClientData = {
+                     id: client.id!,
+                     name: client.name,
+                     email: client.email,
+                     phone: client.phone,
+                     address: client.address,
+                     paymentTerms: client.paymentTerms,
+                     balanceDue: client.balanceDue,
+                     createdAt: client.createdAt?.toISOString(),
+                     updatedAt: client.updatedAt?.toISOString(),
+                 };
+
+                return (
+                    <TableRow key={serializableClient.id}>
+                      <TableCell className="font-medium">{serializableClient.name}</TableCell>
+                      <TableCell>{serializableClient.email || '-'}</TableCell>
+                      <TableCell>{serializableClient.phone || '-'}</TableCell>
+                      <TableCell>{serializableClient.paymentTerms || '-'}</TableCell>
+                      <TableCell className="text-right">{formatCurrency(serializableClient.balanceDue)}</TableCell>
+                      <TableCell className="text-right space-x-1">
+                        <EditClientDialog client={serializableClient}>
+                           <Button variant="ghost" size="icon" className="h-8 w-8">
+                             <Edit className="h-4 w-4" />
+                             <span className="sr-only">Edit Client</span>
+                           </Button>
+                         </EditClientDialog>
+                         <DeleteClientDialog clientId={serializableClient.id!} clientName={serializableClient.name}>
+                           <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
+                             <Trash2 className="h-4 w-4" />
+                             <span className="sr-only">Delete Client</span>
+                           </Button>
+                         </DeleteClientDialog>
+                      </TableCell>
+                    </TableRow>
+                );
+            })}
               {clients.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6} className="h-24 text-center">

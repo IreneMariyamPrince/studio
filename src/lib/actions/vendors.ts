@@ -1,7 +1,8 @@
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { vendorSchema, vendorFormSchema, VendorSchema } from '@/lib/schemas/vendor';
 import { getTenantId } from '@/lib/utils/tenant';
@@ -41,15 +42,21 @@ export async function getVendors(): Promise<VendorSchema[]> {
     const vendorsArray = await vendorsCursor.toArray();
 
     // Map MongoDB document to schema
-     return vendorsArray.map(doc => vendorSchema.parse({
-        ...doc,
-        id: doc._id?.toHexString(),
-        email: doc.email ?? undefined,
-        phone: doc.phone ?? undefined,
-        address: doc.address ?? undefined,
-        paymentTerms: doc.paymentTerms ?? undefined,
-        balanceOwed: doc.balanceOwed ?? 0,
-    }));
+     return vendorsArray.map(doc => {
+         // Serialize dates before parsing
+         const serializableDoc = {
+             ...doc,
+             id: doc._id?.toHexString(),
+             email: doc.email ?? undefined,
+             phone: doc.phone ?? undefined,
+             address: doc.address ?? undefined,
+             paymentTerms: doc.paymentTerms ?? undefined,
+             balanceOwed: doc.balanceOwed ?? 0,
+             createdAt: doc.createdAt?.toISOString(),
+             updatedAt: doc.updatedAt?.toISOString(),
+         };
+         return vendorSchema.parse(serializableDoc);
+     });
   } catch (error) {
      console.error(`[ACTION_ERROR] ${context}:`, error);
      console.warn(`[DB_WARN] Returning empty vendors list for tenant ${tenantId} due to unexpected error.`);
@@ -102,13 +109,20 @@ export async function addVendor(formData: FormData): Promise<ActionResult> {
     const result = await vendorsCollection.insertOne(newVendorDocument);
      if (!result.insertedId) throw new Error("Failed to insert vendor.");
 
+     const serializableNewVendor = {
+         ...newVendorDocument,
+         id: result.insertedId.toHexString(),
+         createdAt: newVendorDocument.createdAt.toISOString(),
+         updatedAt: newVendorDocument.updatedAt.toISOString(),
+     };
+
     revalidatePath('/vendors');
     revalidatePath('/expenses/new');
-    return { success: true, message: `Vendor "${newVendorDocument.name}" added successfully.`, data: { ...newVendorDocument, id: result.insertedId.toHexString() } };
+    return { success: true, message: `Vendor "${newVendorDocument.name}" added successfully.`, data: vendorSchema.parse(serializableNewVendor) };
   } catch (error: unknown) {
     console.error(`[DB_ERROR] ${context}:`, error);
     // Handle potential duplicate key errors on email if index exists
-    if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+    if (error instanceof MongoServerError && error.code === 11000 && error.message.includes('email')) {
         return { success: false, message: 'Database Error: Email already exists.', error: 'Duplicate Key', fieldErrors: { email: ['Email already registered.'] } };
     }
     return {
@@ -144,7 +158,7 @@ export async function updateVendor(formData: FormData): Promise<ActionResult> {
         const vendorsCollection = await getVendorsCollection();
 
         // Verify vendor exists and belongs to tenant
-        const vendor = await vendorsCollection.findOne({ _id: vendorId, tenantId: tenantId }, { projection: { _id: 1 } });
+        const vendor = await vendorsCollection.findOne({ _id: vendorId, tenantId: tenantId }, { projection: { _id: 1, email: 1 } }); // Fetch email for comparison
         if (!vendor) return { success: false, message: 'Vendor not found or access denied.', error: 'Not Found' };
 
          // Optional: Check for duplicate email if email is being changed
@@ -169,7 +183,7 @@ export async function updateVendor(formData: FormData): Promise<ActionResult> {
     } catch (error) {
         console.error(`[DB_ERROR] ${context}:`, error);
         // Handle potential duplicate key errors on email
-        if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+        if (error instanceof MongoServerError && error.code === 11000 && error.message.includes('email')) {
             return { success: false, message: 'Email already in use.', error: 'Duplicate Key', fieldErrors: { email: ['Email already in use.'] } };
         }
         return { success: false, message: 'Database Error: Failed to update vendor.' };

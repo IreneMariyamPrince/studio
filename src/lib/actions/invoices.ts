@@ -1,9 +1,10 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { invoiceSchema, invoiceItemSchema, InvoiceSchema, invoiceFormSchema } from '@/lib/schemas/invoice';
 import { clientSchema } from '@/lib/schemas/client';
@@ -36,7 +37,7 @@ async function getInvoiceItemsCollection(): Promise<Collection<InvoiceItemDocume
   const { db } = await connectToDatabase();
   return db.collection<InvoiceItemDocument>('invoiceItems'); // Separate collection for items
 }
-async function getClientsCollection(): Promise<Collection<any>> {
+export async function getClientsCollection(): Promise<Collection<any>> {
     const { db } = await connectToDatabase();
     return db.collection('clients');
 }
@@ -133,31 +134,36 @@ export async function getInvoices(): Promise<InvoiceSchema[]> {
     const invoicesArray = await invoicesCursor.toArray();
 
      // Map and parse data
-     return invoicesArray.map(inv => invoiceSchema.parse({
-         ...inv,
-         id: inv._id?.toHexString(),
-         clientId: inv.clientId?.toHexString(), // Convert back to string
-         revenueAccountId: inv.revenueAccountId?.toHexString() ?? undefined,
-         total: inv.total, // Assuming stored as number
-         issueDate: new Date(inv.issueDate),
-         dueDate: new Date(inv.dueDate),
-         notes: inv.notes ?? undefined,
-         client: inv.client ? {
-             id: inv.client._id?.toHexString(),
-             name: inv.client.name,
-             // Add other needed client fields
-         } : undefined,
-         items: inv.items.map((item: any) => invoiceItemSchema.parse({ // Parse looked-up items
-             id: item._id?.toHexString(),
-             invoiceId: item.invoiceId?.toHexString(),
-             description: item.description,
-             quantity: item.quantity,
-             unitPrice: item.unitPrice, // Assuming number
-             total: item.total, // Assuming number
-             taxRateId: item.taxRateId?.toHexString() ?? undefined,
-             // Parse taxRate if joined and included
-         })),
-     }));
+     return invoicesArray.map(inv => {
+        // Serialize dates before parsing
+        const serializableInv = {
+            ...inv,
+            id: inv._id?.toHexString(),
+            clientId: inv.clientId?.toHexString(), // Convert back to string
+            revenueAccountId: inv.revenueAccountId?.toHexString() ?? undefined,
+            total: inv.total, // Assuming stored as number
+            issueDate: inv.issueDate?.toISOString(), // Convert Date to ISO string
+            dueDate: inv.dueDate?.toISOString(), // Convert Date to ISO string
+            createdAt: inv.createdAt?.toISOString(),
+            updatedAt: inv.updatedAt?.toISOString(),
+            notes: inv.notes ?? undefined,
+            client: inv.client ? {
+                ...inv.client, // Include all client fields fetched
+                id: inv.client._id?.toHexString(),
+                createdAt: inv.client.createdAt?.toISOString(), // Serialize nested dates too
+                updatedAt: inv.client.updatedAt?.toISOString(),
+            } : undefined,
+            items: inv.items.map((item: any) => ({ // Serialize item dates
+                ...item,
+                id: item._id?.toHexString(),
+                invoiceId: item.invoiceId?.toHexString(),
+                taxRateId: item.taxRateId?.toHexString() ?? undefined,
+                createdAt: item.createdAt?.toISOString(),
+                updatedAt: item.updatedAt?.toISOString(),
+            })),
+        };
+         return invoiceSchema.parse(serializableInv);
+     });
 
   } catch (error) {
        console.error(`[ACTION_ERROR] ${context}:`, error);
@@ -211,36 +217,36 @@ export async function getInvoiceById(idString: string): Promise<InvoiceSchema | 
      }
       const invoiceDoc = invoiceResult[0];
 
-
-     // Parse and return, ensuring full client data is parsed
-     return invoiceSchema.parse({
+    // Serialize before parsing
+     const serializableDoc = {
         ...invoiceDoc,
         id: invoiceDoc._id.toHexString(),
         clientId: invoiceDoc.clientId.toHexString(),
         revenueAccountId: invoiceDoc.revenueAccountId?.toHexString() ?? undefined,
         total: invoiceDoc.total,
-        issueDate: new Date(invoiceDoc.issueDate),
-        dueDate: new Date(invoiceDoc.dueDate),
+        issueDate: invoiceDoc.issueDate?.toISOString(),
+        dueDate: invoiceDoc.dueDate?.toISOString(),
+        createdAt: invoiceDoc.createdAt?.toISOString(),
+        updatedAt: invoiceDoc.updatedAt?.toISOString(),
         notes: invoiceDoc.notes ?? undefined,
-        client: clientSchema.parse({ // Parse full client data
+        client: invoiceDoc.client ? {
              ...invoiceDoc.client,
              id: invoiceDoc.client._id.toHexString(),
-             email: invoiceDoc.client.email ?? undefined,
-             address: invoiceDoc.client.address ?? undefined,
-             phone: invoiceDoc.client.phone ?? undefined,
-             paymentTerms: invoiceDoc.client.paymentTerms ?? undefined,
-             balanceDue: invoiceDoc.client.balanceDue ?? 0,
-        }),
-        items: invoiceDoc.items.map((item: any) => invoiceItemSchema.parse({
+             createdAt: invoiceDoc.client.createdAt?.toISOString(),
+             updatedAt: invoiceDoc.client.updatedAt?.toISOString(),
+        } : undefined,
+        items: invoiceDoc.items.map((item: any) => ({
+            ...item,
             id: item._id.toHexString(),
             invoiceId: item.invoiceId.toHexString(),
-            description: item.description,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            total: item.total,
             taxRateId: item.taxRateId?.toHexString() ?? undefined,
+            createdAt: item.createdAt?.toISOString(),
+            updatedAt: item.updatedAt?.toISOString(),
         })),
-     });
+     };
+
+     // Parse and return, ensuring full client data is parsed
+     return invoiceSchema.parse(serializableDoc);
   } catch (error: unknown) {
        console.error(`[ACTION_ERROR] ${context}:`, error);
        console.warn(`[DB_WARN] Returning null for invoice ${idString} (tenant ${tenantId}) due to unexpected error.`);
@@ -402,6 +408,9 @@ export async function createInvoice(formData: FormData): Promise<ActionResult> {
   } catch (error: unknown) {
     console.error(`[DB_ERROR] ${context}:`, error);
     // Handle potential duplicate invoiceNumber if constraint exists (unlikely with sequence)
+     if (error instanceof MongoServerError && error.code === 11000 && error.message.includes('invoiceNumber_tenantId')) {
+         return { success: false, message: 'Database Error: Invoice number conflict. Please try again.', error: 'Duplicate Key' };
+     }
     return { success: false, message: 'Database Error: Failed to create invoice.', error: error instanceof Error ? error.message : String(error) };
   }
 }

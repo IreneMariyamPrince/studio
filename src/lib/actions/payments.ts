@@ -1,8 +1,9 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { paymentSchema, paymentFormSchema, PaymentSchema } from '@/lib/schemas/payment';
 import { getTenantId } from '@/lib/utils/tenant';
@@ -81,21 +82,27 @@ export async function getPayments(): Promise<PaymentSchema[]> {
     const paymentsArray = await paymentsCursor.toArray();
 
     // Map and parse data
-    return paymentsArray.map(p => paymentSchema.parse({
-        ...p,
-        id: p._id?.toHexString(),
-        bankAccountId: p.bankAccountId?.toHexString(),
-        invoiceId: p.invoiceId?.toHexString() ?? undefined,
-        expenseId: p.expenseId?.toHexString() ?? undefined,
-        paymentDate: new Date(p.paymentDate),
-        amount: p.amount, // Assuming number
-        reference: p.reference ?? undefined,
-        notes: p.notes ?? undefined,
-        // Map nested objects
-        bankAccount: p.bankAccount ? { id: p.bankAccount._id?.toHexString(), name: p.bankAccount.name } : undefined,
-        invoice: p.invoice ? { id: p.invoice._id?.toHexString(), invoiceNumber: p.invoice.invoiceNumber } : undefined,
-        expense: p.expense ? { id: p.expense._id?.toHexString(), description: p.expense.description, amount: p.expense.amount } : undefined,
-    }));
+    return paymentsArray.map(p => {
+        // Serialize dates before parsing
+        const serializablePayment = {
+            ...p,
+            id: p._id?.toHexString(),
+            bankAccountId: p.bankAccountId?.toHexString(),
+            invoiceId: p.invoiceId?.toHexString() ?? undefined,
+            expenseId: p.expenseId?.toHexString() ?? undefined,
+            paymentDate: p.paymentDate?.toISOString(), // Convert Date to ISO string
+            createdAt: p.createdAt?.toISOString(),
+            updatedAt: p.updatedAt?.toISOString(),
+            amount: p.amount, // Assuming number
+            reference: p.reference ?? undefined,
+            notes: p.notes ?? undefined,
+            // Map nested objects
+            bankAccount: p.bankAccount ? { id: p.bankAccount._id?.toHexString(), name: p.bankAccount.name } : undefined,
+            invoice: p.invoice ? { id: p.invoice._id?.toHexString(), invoiceNumber: p.invoice.invoiceNumber } : undefined,
+            expense: p.expense ? { id: p.expense._id?.toHexString(), description: p.expense.description, amount: p.expense.amount } : undefined,
+        };
+        return paymentSchema.parse(serializablePayment);
+    });
   } catch (error) {
     console.error(`[ACTION_ERROR] ${context}:`, error);
     console.warn(`[DB_WARN] Returning empty payments list for tenant ${tenantId} due to unexpected error.`);
@@ -289,6 +296,8 @@ export async function deletePayment(idString: string): Promise<ActionResult> {
     const { db, client: mongoClient } = await connectToDatabase();
     const session = mongoClient.startSession();
     try {
+         let payment: WithId<PaymentDocument> | null = null; // Store payment details for revalidation
+
          await session.withTransaction(async () => {
              const paymentsCollection = db.collection<PaymentDocument>('payments');
              const bankAccountsCollection = db.collection('bankAccounts');
@@ -296,7 +305,7 @@ export async function deletePayment(idString: string): Promise<ActionResult> {
              const expensesCollection = db.collection('expenses');
 
              // 1. Find the payment and verify ownership
-             const payment = await paymentsCollection.findOne({ _id: paymentId, tenantId: tenantId }, { session });
+             payment = await paymentsCollection.findOne({ _id: paymentId, tenantId: tenantId }, { session });
              if (!payment) throw new Error('Payment not found or access denied.');
 
              const amount = payment.amount;

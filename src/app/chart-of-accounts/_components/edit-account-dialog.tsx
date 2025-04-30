@@ -1,3 +1,4 @@
+
 'use client';
 
 import type { ReactNode } from 'react';
@@ -12,16 +13,23 @@ import {
 } from "@/components/ui/dialog";
 import { AccountForm } from './account-form'; // Use local form component
 import { updateAccount } from '@/lib/actions/accounts';
-import type { AccountSchema, AccountFormSchema } from '@/lib/schemas/account'; // Import both schemas
+import type { AccountSchema, AccountFormSchema } from '@/lib/schemas/account'; // Keep AccountFormSchema
 import { useToast } from "@/hooks/use-toast";
 import { Button } from '@/components/ui/button';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { accountFormSchema } from '@/lib/schemas/account'; // Import the form schema
 
+// Define a type for the serializable account data passed from the server
+export type SerializableAccountData = Omit<AccountSchema, 'createdAt' | 'updatedAt'> & {
+    id: string; // Ensure ID is string
+    createdAt?: string; // Date as string
+    updatedAt?: string; // Date as string
+};
+
 interface EditAccountDialogProps {
   children: ReactNode; // Trigger element (e.g., Edit button)
-  account: AccountSchema; // Pass the full AccountSchema for initial data
+  account: SerializableAccountData; // Use the serializable type
 }
 
 export function EditAccountDialog({ children, account }: EditAccountDialogProps) {
@@ -29,7 +37,7 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
 
-  // Prepare default values for the form schema from the full account schema
+  // Prepare default values for the form schema from the *serializable* account data
    const defaultFormValues: AccountFormSchema = {
        code: account.code,
        name: account.name,
@@ -64,7 +72,7 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
   const onSubmit = (data: AccountFormSchema) => {
      form.clearErrors();
      const formData = new FormData();
-     formData.append('id', account.id!); // Add the ID for the update action
+     formData.append('id', account.id); // Use the ID from the prop
 
      Object.entries(data).forEach(([key, value]) => {
         if (typeof value === 'boolean') {
@@ -129,3 +137,4 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
     </Dialog>
   );
 }
+

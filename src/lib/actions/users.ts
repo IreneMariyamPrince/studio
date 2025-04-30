@@ -1,11 +1,13 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { userSchema, userFormSchema, UserSchema, userRoles } from '@/lib/schemas/user';
 import { getTenantId, getUserId, isSuperAdmin } from '@/lib/utils/tenant';
+import { z } from 'zod'; // Ensure z is imported
 
 // Type definition for MongoDB documents
 type UserDocument = Omit<UserSchema, 'id' | 'tenantId'> & {
@@ -61,13 +63,19 @@ export async function getUsers(): Promise<ActionResult> {
     const usersCursor = usersCollection.find(query).sort({ name: 1 });
     const usersArray = await usersCursor.toArray();
 
-     const parsedUsers = usersArray.map(u => userSchema.parse({
-         ...u,
-         id: u._id?.toHexString(),
-         tenantId: u.tenantId ?? undefined, // Handle null/undefined tenantId for super admins potentially
-         name: u.name ?? undefined,
-         firebaseUid: u.firebaseUid ?? undefined,
-     }));
+     const parsedUsers = usersArray.map(u => {
+        // Serialize dates before parsing
+         const serializableUser = {
+             ...u,
+             id: u._id?.toHexString(),
+             tenantId: u.tenantId ?? undefined, // Handle null/undefined tenantId for super admins potentially
+             name: u.name ?? undefined,
+             firebaseUid: u.firebaseUid ?? undefined,
+             createdAt: u.createdAt?.toISOString(),
+             updatedAt: u.updatedAt?.toISOString(),
+         };
+         return userSchema.parse(serializableUser);
+     });
 
     return { success: true, message: 'Users fetched successfully.', data: parsedUsers };
   } catch (error) {
@@ -153,13 +161,20 @@ export async function addUser(formData: FormData): Promise<ActionResult> {
         const result = await usersCollection.insertOne(newUserDocument);
         if (!result.insertedId) throw new Error("Failed to insert user.");
 
+         const serializableNewUser = {
+             ...newUserDocument,
+             id: result.insertedId.toHexString(),
+             createdAt: newUserDocument.createdAt.toISOString(),
+             updatedAt: newUserDocument.updatedAt.toISOString(),
+         };
+
         revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings');
-        return { success: true, message: 'User added successfully.', data: userSchema.parse({ ...newUserDocument, id: result.insertedId.toHexString()}) };
+        return { success: true, message: 'User added successfully.', data: userSchema.parse(serializableNewUser) };
 
     } catch (error) {
         console.error(`[DB_ERROR] ${context}:`, error);
         // Handle duplicate email error from MongoDB index
-        if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+        if (error instanceof MongoServerError && error.code === 11000 && error.message.includes('email')) {
              return { success: false, message: 'A user with this email already exists.', error: 'Duplicate Key', fieldErrors: { email: ['Email already in use.'] } };
         }
         return { success: false, message: 'Failed to add user.', error };
@@ -258,12 +273,18 @@ export async function updateUser(formData: FormData): Promise<ActionResult> {
 
         revalidatePath(currentUserIsSuper ? '/superadmin/users' : '/settings');
          const updatedUserDoc = await usersCollection.findOne({ _id: targetUserId });
-         const returnData = updatedUserDoc ? userSchema.parse({ ...updatedUserDoc, id: updatedUserDoc._id.toHexString(), tenantId: updatedUserDoc.tenantId ?? undefined }) : null;
+          const returnData = updatedUserDoc ? userSchema.parse({
+             ...updatedUserDoc,
+             id: updatedUserDoc._id.toHexString(),
+             tenantId: updatedUserDoc.tenantId ?? undefined,
+             createdAt: updatedUserDoc.createdAt?.toISOString(),
+             updatedAt: updatedUserDoc.updatedAt?.toISOString(),
+          }) : null;
         return { success: true, message: 'User updated successfully.', data: returnData };
     } catch (error) {
         console.error(`[DB_ERROR] ${context}:`, error);
         // Handle duplicate email error from index
-        if ((error as any).code === 11000 && (error as any).message.includes('email')) {
+        if (error instanceof MongoServerError && error.code === 11000 && error.message.includes('email')) {
              return { success: false, message: 'This email is already in use.', fieldErrors: { email: ['Email already in use.'] } };
         }
         return { success: false, message: 'Failed to update user.', error };

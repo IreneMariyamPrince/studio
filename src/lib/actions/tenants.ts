@@ -1,11 +1,13 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { tenantSchema, tenantFormSchema, TenantSchema } from '@/lib/schemas/tenant';
 import { isSuperAdmin } from '@/lib/utils/tenant'; // Keep using this for authorization
+import { z } from 'zod'; // Ensure z is imported
 
 // Type definition for MongoDB documents
 type TenantDocument = Omit<TenantSchema, 'id'> & { _id?: ObjectId; createdAt?: Date; updatedAt?: Date };
@@ -44,10 +46,16 @@ export async function getAllTenants(): Promise<ActionResult> {
     const tenantsCursor = tenantsCollection.find({}).sort({ name: 1 });
     const tenantsArray = await tenantsCursor.toArray();
 
-    const parsedTenants = tenantsArray.map(t => tenantSchema.parse({
-        ...t,
-        id: t._id?.toHexString(),
-    }));
+    const parsedTenants = tenantsArray.map(t => {
+        // Serialize dates before parsing
+        const serializableTenant = {
+            ...t,
+            id: t._id?.toHexString(),
+            createdAt: t.createdAt?.toISOString(),
+            updatedAt: t.updatedAt?.toISOString(),
+        };
+        return tenantSchema.parse(serializableTenant);
+    });
     return { success: true, message: 'Tenants fetched successfully.', data: parsedTenants };
   } catch (error) {
     console.error(`[ACTION_ERROR] ${context}:`, error);
@@ -106,7 +114,12 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
             { session }
         );
         // Store data to return outside transaction
-        createdTenantData = tenantSchema.parse({ ...validatedFields.data, id: newTenantId.toHexString() });
+        createdTenantData = tenantSchema.parse({
+             ...validatedFields.data,
+              id: newTenantId.toHexString(),
+              createdAt: new Date().toISOString(), // Provide current date as string
+              updatedAt: new Date().toISOString()
+        });
      }); // End Transaction
 
     await session.endSession();
@@ -119,6 +132,9 @@ export async function createTenant(formData: FormData): Promise<ActionResult> {
      console.error(`[DB_ERROR] ${context}:`, error);
      if (error instanceof Error && error.message === 'Duplicate Key') {
        return { success: false, message: 'A tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
+     }
+     if (error instanceof MongoServerError && error.code === 11000) {
+         return { success: false, message: 'A tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
      }
      return { success: false, message: 'Failed to create tenant.', error };
   }
@@ -177,12 +193,17 @@ export async function updateTenant(formData: FormData): Promise<ActionResult> {
     revalidatePath('/superadmin/tenants');
     // Fetch updated tenant data to return
     const updatedTenantDoc = await tenantsCollection.findOne({ _id: tenantId });
-    const returnData = updatedTenantDoc ? tenantSchema.parse({ ...updatedTenantDoc, id: updatedTenantDoc._id.toHexString() }) : null;
+    const returnData = updatedTenantDoc ? tenantSchema.parse({
+         ...updatedTenantDoc,
+         id: updatedTenantDoc._id.toHexString(),
+         createdAt: updatedTenantDoc.createdAt?.toISOString(),
+         updatedAt: updatedTenantDoc.updatedAt?.toISOString(),
+         }) : null;
     return { success: true, message: 'Tenant updated successfully.', data: returnData };
   } catch (error) {
     console.error(`[DB_ERROR] ${context}:`, error);
     // Handle potential duplicate key errors during update (race condition, though check helps)
-    if ((error as any).code === 11000) {
+    if (error instanceof MongoServerError && error.code === 11000) {
          return { success: false, message: 'Another tenant with this name already exists.', error: 'Duplicate Key', fieldErrors: { name: ['Name already taken.'] } };
     }
     return { success: false, message: 'Failed to update tenant.', error };
@@ -217,15 +238,19 @@ export async function deleteTenant(idString: string): Promise<ActionResult> {
 
          // 2. Delete data from ALL related collections (use tenantId as the filter)
           console.log(`Deleting data for tenant ${tenantId}...`);
-          await db.collection('users').deleteMany({ tenantId: tenantId.toHexString() }, { session }); // Assuming tenantId on user is string
-          await db.collection('accounts').deleteMany({ tenantId: tenantId.toHexString() }, { session }); // Assuming tenantId on account is string
-          await db.collection('invoices').deleteMany({ tenantId: tenantId.toHexString() }, { session });
-          await db.collection('invoiceItems').deleteMany({ /* Need a way to link items to tenant, maybe add tenantId? Or delete by invoiceIds first */ }, { session }); // Requires careful handling
-          await db.collection('expenses').deleteMany({ tenantId: tenantId.toHexString() }, { session });
-          await db.collection('payments').deleteMany({ tenantId: tenantId.toHexString() }, { session });
-          await db.collection('clients').deleteMany({ tenantId: tenantId.toHexString() }, { session });
-          await db.collection('vendors').deleteMany({ tenantId: tenantId.toHexString() }, { session });
-          await db.collection('budgets').deleteMany({ tenantId: tenantId.toHexString() }, { session });
+          await db.collection('users').deleteMany({ tenantId: idString }, { session }); // Assuming tenantId on user is string
+          await db.collection('accounts').deleteMany({ tenantId: idString }, { session }); // Assuming tenantId on account is string
+          await db.collection('invoices').deleteMany({ tenantId: idString }, { session });
+          // Find invoice IDs first to delete items
+          const invoiceIdsToDelete = await db.collection('invoices').find({ tenantId: idString }, { projection: { _id: 1 }, session }).map(inv => inv._id).toArray();
+          if (invoiceIdsToDelete.length > 0) {
+              await db.collection('invoiceItems').deleteMany({ invoiceId: { $in: invoiceIdsToDelete } }, { session });
+          }
+          await db.collection('expenses').deleteMany({ tenantId: idString }, { session });
+          await db.collection('payments').deleteMany({ tenantId: idString }, { session });
+          await db.collection('clients').deleteMany({ tenantId: idString }, { session });
+          await db.collection('vendors').deleteMany({ tenantId: idString }, { session });
+          await db.collection('budgets').deleteMany({ tenantId: idString }, { session });
           await db.collection('companySettings').deleteMany({ tenantId: tenantId }, { session }); // Assuming tenantId is ObjectId here
           // ... delete from any other tenant-specific collections ...
           console.log(`Finished deleting associated data for tenant ${tenantId}.`);

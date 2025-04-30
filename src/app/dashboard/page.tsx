@@ -1,4 +1,5 @@
 
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -103,8 +104,9 @@ export default async function DashboardPage() {
                  <TableBody>
                    {recentExpenses.map(exp => (
                      <TableRow key={exp.id}>
+                       {/* Ensure date is a valid Date object before formatting */}
                        <TableCell>{format(new Date(exp.date), 'PP')}</TableCell>
-                       <TableCell>{exp.account.name}</TableCell>
+                       <TableCell>{exp.account?.name ?? 'N/A'}</TableCell>
                        <TableCell className="text-right">{formatCurrency(exp.amount)}</TableCell>
                      </TableRow>
                    ))}
@@ -141,9 +143,9 @@ export default async function DashboardPage() {
                    {recentInvoices.map(inv => (
                      <TableRow key={inv.id}>
                        <TableCell className="font-medium">{inv.invoiceNumber}</TableCell>
-                       <TableCell>{inv.client.name}</TableCell>
-                       <TableCell><Badge variant={inv.status === 'Paid' ? 'default' : inv.status === 'Pending' ? 'secondary' : 'outline'}>{inv.status}</Badge></TableCell>
-                       <TableCell className="text-right">{formatCurrency(inv.total)}</TableCell>
+                       <TableCell>{inv.client?.name ?? 'N/A'}</TableCell>
+                       <TableCell><Badge variant={inv.status === 'Paid' ? 'success' : inv.status === 'Pending' || inv.status === 'Partial' ? 'secondary' : 'outline'}>{inv.status}</Badge></TableCell>
+                       <TableCell className="text-right">{formatCurrency(inv.total!)}</TableCell>
                      </TableRow>
                    ))}
                  </TableBody>

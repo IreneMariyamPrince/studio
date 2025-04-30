@@ -1,8 +1,9 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { journalEntrySchema, journalEntryFormSchema, JournalEntrySchema, journalEntryLineSchema, entryTypes } from '@/lib/schemas/journalEntry';
 import { accountSchema } from '@/lib/schemas/account';
@@ -111,29 +112,30 @@ export async function getJournalEntries(): Promise<JournalEntrySchema[]> {
     const entriesArray = await entriesCursor.toArray();
 
     // Map and parse data
-     return entriesArray.map(entry => journalEntrySchema.parse({
-        ...entry,
-        id: entry._id?.toHexString(),
-        createdById: entry.createdById?.toHexString() ?? undefined,
-        entryDate: new Date(entry.entryDate),
-        reference: entry.reference ?? undefined,
-        lines: entry.lines.map((line: any) => journalEntryLineSchema.parse({
-            id: line._id?.toHexString(),
-            journalEntryId: line.journalEntryId?.toHexString(),
-            accountId: line.accountId?.toHexString(),
-            type: line.type,
-            amount: line.amount, // Assuming number
-            description: line.description ?? undefined,
-            account: line.account ? { // Parse the projected account object
-                id: line.account.id?.toHexString(),
-                name: line.account.name,
-                code: line.account.code,
-                type: line.account.type,
-                 // Add other fields if needed and projected
-            } : undefined,
-        })),
-        // createdBy: entry.createdBy ? userSchema.parse(...) : undefined,
-    }));
+     return entriesArray.map(entry => {
+         // Serialize dates before parsing
+         const serializableEntry = {
+             ...entry,
+             id: entry._id?.toHexString(),
+             createdById: entry.createdById?.toHexString() ?? undefined,
+             entryDate: entry.entryDate?.toISOString(), // Convert Date to ISO string
+             reference: entry.reference ?? undefined,
+             createdAt: entry.createdAt?.toISOString(),
+             updatedAt: entry.updatedAt?.toISOString(),
+             lines: entry.lines.map((line: any) => ({
+                 ...line,
+                 id: line._id?.toHexString(),
+                 journalEntryId: line.journalEntryId?.toHexString(),
+                 accountId: line.accountId?.toHexString(),
+                 createdAt: line.createdAt?.toISOString(),
+                 account: line.account ? {
+                    ...line.account,
+                    id: line.account.id?.toHexString(),
+                 } : undefined,
+             })),
+         };
+         return journalEntrySchema.parse(serializableEntry);
+     });
   } catch (error) {
     console.error(`[ACTION_ERROR] ${context}:`, error);
     console.warn(`[DB_WARN] Returning empty journal entries list for tenant ${tenantId} due to unexpected error.`);
