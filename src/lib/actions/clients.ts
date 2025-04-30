@@ -46,7 +46,7 @@ export async function getClients(): Promise<ClientSchema[]> {
         const id = doc._id ? doc._id.toHexString() : undefined;
         return clientSchema.parse({
             ...doc,
-            id: id,
+            id: id ?? undefined,
             email: doc.email ?? undefined,
             phone: doc.phone ?? undefined,
             address: doc.address ?? undefined,
@@ -252,7 +252,7 @@ export async function deleteClient(idString: string): Promise<ActionResult> {
         }
 
         // 2. Check for related invoices (important!)
-         const relatedInvoice = await invoicesCollection.findOne({ clientId: clientId, tenantId: tenantId }, { projection: { _id: 1 } }); // Assuming tenantId is also on invoices
+         const relatedInvoice = await invoicesCollection.findOne({ clientId: clientId, tenantId: tenantId }, { projection: { _id: 1 } });
          if (relatedInvoice) {
              return { success: false, message: 'Cannot delete client: Client has associated invoices.', error: 'Constraint Violation' };
          }
