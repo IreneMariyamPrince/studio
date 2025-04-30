@@ -41,15 +41,19 @@ export async function getClients(): Promise<ClientSchema[]> {
     const clientsArray = await clientsCursor.toArray();
 
     // Map MongoDB document to schema
-    return clientsArray.map(doc => clientSchema.parse({
-        ...doc,
-        id: doc._id?.toHexString(),
-        email: doc.email ?? undefined,
-        phone: doc.phone ?? undefined,
-        address: doc.address ?? undefined,
-        paymentTerms: doc.paymentTerms ?? undefined,
-        balanceDue: doc.balanceDue ?? 0,
-    }));
+    return clientsArray.map(doc => {
+        // Check if _id exists before attempting to convert to hex string. fixes: ZodError: Invalid cuid
+        const id = doc._id ? doc._id.toHexString() : undefined;
+        return clientSchema.parse({
+            ...doc,
+            id: id,
+            email: doc.email ?? undefined,
+            phone: doc.phone ?? undefined,
+            address: doc.address ?? undefined,
+            paymentTerms: doc.paymentTerms ?? undefined,
+            balanceDue: doc.balanceDue ?? 0,
+    })
+    });
   } catch (error) {
      console.error(`[ACTION_ERROR] ${context}:`, error);
      console.warn(`[DB_WARN] Returning empty clients list for tenant ${tenantId} due to unexpected error.`);
