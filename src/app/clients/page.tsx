@@ -1,3 +1,4 @@
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -11,13 +12,11 @@ import {
   TableCell,
   TableCaption,
 } from "@/components/ui/table";
-import Link from 'next/link';
 import { getClients } from '@/lib/actions/clients'; // Adjust path if needed
 import type { ClientSchema } from '@/lib/schemas/client';
-// Import Add/Edit/Delete dialogs when created
-// import { AddClientDialog } from './_components/add-client-dialog';
-// import { EditClientDialog } from './_components/edit-client-dialog';
-// import { DeleteClientDialog } from './_components/delete-client-dialog';
+import { AddClientDialog } from './_components/add-client-dialog';
+import { EditClientDialog } from './_components/edit-client-dialog';
+import { DeleteClientDialog } from './_components/delete-client-dialog';
 import 'server-only';
 
 function formatCurrency(amount: number | null | undefined): string {
@@ -32,11 +31,11 @@ export default async function ClientsPage() {
     <DashboardLayout>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Manage Clients</h1>
-        {/* <AddClientDialog> */}
+        <AddClientDialog>
           <Button>
-            <PlusCircle className="mr-2 h-4 w-4" /> Add New Client (Not Implemented)
+            <PlusCircle className="mr-2 h-4 w-4" /> Add New Client
           </Button>
-        {/* </AddClientDialog> */}
+        </AddClientDialog>
       </div>
 
       <Card>
@@ -66,18 +65,18 @@ export default async function ClientsPage() {
                   <TableCell>{client.paymentTerms || '-'}</TableCell>
                   <TableCell className="text-right">{formatCurrency(client.balanceDue)}</TableCell>
                   <TableCell className="text-right space-x-1">
-                    {/* <EditClientDialog client={client}> */}
-                       <Button variant="ghost" size="icon" className="h-8 w-8" disabled>
+                    <EditClientDialog client={client}>
+                       <Button variant="ghost" size="icon" className="h-8 w-8">
                          <Edit className="h-4 w-4" />
                          <span className="sr-only">Edit Client</span>
                        </Button>
-                    {/* </EditClientDialog> */}
-                    {/* <DeleteClientDialog clientId={client.id!} clientName={client.name}> */}
-                       <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10" disabled>
+                     </EditClientDialog>
+                     <DeleteClientDialog clientId={client.id!} clientName={client.name}>
+                       <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10">
                          <Trash2 className="h-4 w-4" />
                          <span className="sr-only">Delete Client</span>
                        </Button>
-                    {/* </DeleteClientDialog> */}
+                     </DeleteClientDialog>
                   </TableCell>
                 </TableRow>
               ))}
@@ -95,3 +94,4 @@ export default async function ClientsPage() {
     </DashboardLayout>
   );
 }
+
