@@ -1,4 +1,3 @@
-
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -6,6 +5,7 @@ import { Collection, ObjectId, WithId } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { vendorSchema, vendorFormSchema, VendorSchema } from '@/lib/schemas/vendor';
 import { getTenantId } from '@/lib/utils/tenant';
+import { z } from 'zod'; // Import z
 
 // Type definition for MongoDB documents
 type VendorDocument = Omit<VendorSchema, 'id'> & { _id?: ObjectId; tenantId: string; createdAt?: Date; updatedAt?: Date };
@@ -144,14 +144,14 @@ export async function updateVendor(formData: FormData): Promise<ActionResult> {
         const vendorsCollection = await getVendorsCollection();
 
         // Verify vendor exists and belongs to tenant
-        const vendor = await vendorsCollection.findOne({ _id: vendorId, tenantId: tenantId });
+        const vendor = await vendorsCollection.findOne({ _id: vendorId, tenantId: tenantId }, { projection: { _id: 1 } });
         if (!vendor) return { success: false, message: 'Vendor not found or access denied.', error: 'Not Found' };
 
          // Optional: Check for duplicate email if email is being changed
         if (updateData.email && updateData.email !== vendor.email) {
              const existingEmail = await vendorsCollection.findOne({ _id: { $ne: vendorId }, tenantId, email: updateData.email });
              if (existingEmail) {
-                  return { success: false, message: `Email already in use.`, error: 'Duplicate Key', fieldErrors: { email: [`Email already in use.`] } };
+                  return { success: false, message: `Email already in use.`, error: 'Duplicate Key', fieldErrors: { email: ['Email already in use.'] } };
              }
         }
 
