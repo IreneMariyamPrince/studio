@@ -1,9 +1,12 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 import { clientSchema } from './client'; // Import Client schema
 import { taxRateSchema } from './taxRate'; // Import TaxRate schema
 import { accountSchema } from './account'; // Import Account schema
 
 export const invoiceItemSchema = z.object({
+
   id: z.string().optional(), // Optional for creation
   invoiceId: z.string().optional(), // Optional for creation, linked later
   description: z.string().min(1, { message: "Item description cannot be empty." }),
@@ -14,7 +17,7 @@ export const invoiceItemSchema = z.object({
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
 
-  // Optional relation data
+  // Optional relation data (Ensure TaxRateSchema also uses ObjectId validation if included)
   // taxRate: taxRateSchema.optional(),
 });
 
@@ -23,6 +26,7 @@ export type InvoiceItemSchema = z.infer<typeof invoiceItemSchema>;
 export const invoiceStatus = ['Draft', 'Pending', 'Paid', 'Partial', 'Overdue', 'Cancelled'] as const;
 
 export const invoiceSchema = z.object({
+
   id: z.string().optional(), // Optional for creation
   invoiceNumber: z.string().optional(), // Generated on creation
   clientId: z.string({ message: "Please select a client." }),
@@ -36,7 +40,8 @@ export const invoiceSchema = z.object({
   updatedAt: z.coerce.date().optional(),
   revenueAccountId: z.string().optional(), // Optional link to revenue account
 
-  // Related data included from Prisma fetches
+
+  // Related data included from fetches (Ensure related schemas use ObjectId validation)
   client: clientSchema.optional(),
   // revenueAccount: accountSchema.optional(), // Define accountSchema if needed here
 });
@@ -59,6 +64,8 @@ export const invoiceFormSchema = invoiceSchema.omit({
     items: z.string().refine(val => {
         try {
             const parsed = JSON.parse(val);
+            // Basic check: is it an array and has at least one item?
+            // More robust validation should happen on the parsed array using invoiceItemSchema
             return Array.isArray(parsed) && parsed.length > 0;
         } catch (e) {
             return false;

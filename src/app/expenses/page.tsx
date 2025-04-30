@@ -1,4 +1,5 @@
 
+
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/table";
 import Link from 'next/link';
 import { getExpenses } from '@/lib/actions/expenses'; // Import server action
+import type { ExpenseSchema } from '@/lib/schemas/expense'; // Import ExpenseSchema
 import { format } from 'date-fns'; // For date formatting
 import { Badge } from '@/components/ui/badge'; // For status display
 import 'server-only'; // Ensure data fetching on server
@@ -29,11 +31,12 @@ const statusVariantMap: { [key: string]: "default" | "secondary" | "destructive"
     Approved: "default", // Or 'success' if you add a green variant
     Pending: "secondary",
     Rejected: "destructive",
+    Paid: "success", // Assuming 'success' variant exists in badge
 };
 
 export default async function ExpensesPage() {
   // Fetch expenses on the server
-  const expenses = await getExpenses();
+  const expenses: ExpenseSchema[] = await getExpenses();
 
   return (
     <DashboardLayout>
@@ -68,7 +71,7 @@ export default async function ExpensesPage() {
               {expenses.map((expense) => (
                 <TableRow key={expense.id}>
                   <TableCell>{format(new Date(expense.date), 'PP')}</TableCell> {/* Format date */}
-                  <TableCell>{expense.account.name}</TableCell> {/* Use included account name */}
+                  <TableCell>{expense.account?.name ?? 'N/A'}</TableCell> {/* Use included account name */}
                    <TableCell className="max-w-[200px] truncate" title={expense.description}>
                       {expense.description || '-'}
                    </TableCell>
@@ -87,12 +90,18 @@ export default async function ExpensesPage() {
                           </Link>
                         </Button>
                        {/* Placeholder for Delete */}
-                       {/* <DeleteExpenseDialog expenseId={expense.id!} expenseDescription={expense.description || `Expense on ${format(new Date(expense.date), 'PP')}`}>
+                       {/*
+                       // Pass only necessary serializable data to DeleteExpenseDialog
+                       <DeleteExpenseDialog
+                           expenseId={expense.id!}
+                           expenseDescription={expense.description || `Expense on ${format(new Date(expense.date), 'PP')}`}
+                       >
                            <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10" title="Delete Expense">
                              <Trash2 className="h-4 w-4" />
                              <span className="sr-only">Delete</span>
                            </Button>
-                       </DeleteExpenseDialog> */}
+                       </DeleteExpenseDialog>
+                       */}
                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10" title="Delete Expense (Not Implemented)">
                          <Trash2 className="h-4 w-4" />
                          <span className="sr-only">Delete</span>

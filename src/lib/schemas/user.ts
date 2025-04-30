@@ -1,4 +1,6 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 import type { TenantSchema } from './tenant'; // Import Tenant schema type if needed for relations
 
 export const userRoles = ['Admin', 'Accountant', 'Viewer'] as const;
@@ -11,11 +13,13 @@ export const userSchema = z.object({
   role: z.enum(userRoles).default('Viewer'),
   isActive: z.boolean().optional().default(true),
   isSuperAdmin: z.boolean().optional().default(false), // Flag for super admin
+
   tenantId: z.string().optional(), // Tenant association (optional for SuperAdmin)
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
 
-  // Optional relation data (define TenantSchema if needed)
+
+  // Optional relation data (Ensure TenantSchema uses ObjectId validation if included)
   // tenant: z.lazy(() => tenantSchema).optional(),
 });
 

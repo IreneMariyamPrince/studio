@@ -1,4 +1,6 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const companySettingSchema = z.object({
   id: z.string().optional(), // Optional for creation
@@ -7,8 +9,8 @@ export const companySettingSchema = z.object({
   logoUrl: z.string().url({ message: "Invalid URL format for logo." }).optional().or(z.literal('')),
   address: z.string().optional(),
   // Add other tenant-specific settings here
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 });
 
 export type CompanySettingSchema = z.infer<typeof companySettingSchema>;

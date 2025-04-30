@@ -1,4 +1,5 @@
 
+
 'use client';
 
 import { DashboardLayout } from '@/components/layout/dashboard-layout';
@@ -16,9 +17,8 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { invoiceFormSchema, InvoiceFormSchema, invoiceStatus, ClientSchema, InvoiceItemSchema } from '@/lib/schemas/invoice';
-import { createInvoice } from '@/lib/actions/invoices'; // Import invoice action
-import { getClients } from '@/lib/actions/clients'; // Import getClients action directly
+import { invoiceFormSchema, InvoiceFormSchema, invoiceStatus, InvoiceItemSchema } from '@/lib/schemas/invoice';
+import { createInvoice, getClientsCollection } from '@/lib/actions/invoices'; // Import invoice actions
 import { useToast } from "@/hooks/use-toast";
 import { useRouter } from 'next/navigation';
 import {
@@ -42,14 +42,18 @@ export default function NewInvoicePage() {
   useEffect(() => {
     async function fetchClients() {
       try {
-        const clientData = await getClients(); // Call the imported function
-        setClients(clientData.map(c => ({ value: c.id!, label: c.name })));
-      } catch (error) {
+        const clientData = await getClientsCollection(); // Call the imported function
+        if (clientData.success && Array.isArray(clientData.data)) {
+             setClients(clientData.data.map((c: { id: any; name: any; }) => ({ value: c.id!, label: c.name })));
+        } else {
+             throw new Error(clientData.message || "Failed to fetch clients");
+        }
+
+      } catch (error: any) {
           console.error("Failed to fetch clients:", error);
-          // Optionally show a toast message
           toast({
-              title: "Error",
-              description: "Could not load clients. Please try again later.",
+              title: "Error Loading Clients",
+              description: error.message || "Could not load clients. Please try again later.",
               variant: "destructive",
           })
       }
@@ -66,6 +70,7 @@ export default function NewInvoicePage() {
       status: 'Draft',
       notes: '',
       items: '[{"description":"","quantity":1,"unitPrice":0}]', // Default one item as JSON string
+      revenueAccountId: undefined,
     },
   });
 
@@ -77,9 +82,9 @@ export default function NewInvoicePage() {
   // Update RHF 'items' field whenever local invoiceItems state changes
   useEffect(() => {
     const itemsForRHF = invoiceItems.map(({ id, ...rest }) => rest); // Remove temporary UI id
-    form.setValue('items', JSON.stringify(itemsForRHF));
-    form.trigger('items'); // Trigger validation for the items field
-  }, [invoiceItems, form]);
+    form.setValue('items', JSON.stringify(itemsForRHF), { shouldValidate: true, shouldDirty: true }); // Trigger validation and dirty state
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoiceItems]); // Removed form from dependencies
 
 
   const handleItemChange = (index: number, field: keyof InvoiceItemSchema, value: string | number) => {
@@ -115,6 +120,7 @@ export default function NewInvoicePage() {
 
 
   const onSubmit = (data: InvoiceFormSchema) => {
+     console.log("RHF Data before FormData:", data); // Log RHF data
     const formData = new FormData();
 
     // Append standard form data
@@ -129,6 +135,11 @@ export default function NewInvoicePage() {
 
      // Append items as JSON string (already handled by RHF state update)
      formData.append('items', data.items);
+
+     console.log("FormData contents:"); // Log FormData contents
+      for (const pair of formData.entries()) {
+        console.log(pair[0] + ', ' + pair[1]);
+      }
 
     startTransition(async () => {
       const result = await createInvoice(formData);
@@ -176,14 +187,26 @@ export default function NewInvoicePage() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Client</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isPending || clients.length === 0}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select a client" />
-                        </SelectTrigger>
-                      </FormControl>
+                    <Select
+                      onValueChange={field.onChange}
+                      value={field.value} // Use value and handle undefined/null case for placeholder
+                      disabled={isPending || clients.length === 0}
+                    >
+                      {clients.length === 0 ? (
+                       <FormControl>
+                         <SelectTrigger disabled>
+                           <SelectValue placeholder="Loading clients..." />
+                         </SelectTrigger>
+                       </FormControl>
+                         ) : (
+                         <FormControl>
+                           <SelectTrigger>
+                             <SelectValue placeholder="Select a client" />
+                           </SelectTrigger>
+                         </FormControl>
+                       )}
                       <SelectContent>
-                        {clients.length === 0 && <SelectItem value="loading" disabled>Loading clients...</SelectItem>}
+                        {/* <SelectItem value="" disabled>Select a client</SelectItem> */}
                         {clients.map((client) => (
                           <SelectItem key={client.value} value={client.value}>
                             {client.label}
@@ -386,7 +409,7 @@ export default function NewInvoicePage() {
                 render={({ field }) => (
                     <FormItem>
                     <FormLabel>Status</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isPending}>
+                    <Select onValueChange={field.onChange} value={field.value} disabled={isPending}>
                         <FormControl>
                         <SelectTrigger className="w-full md:w-1/2">
                             <SelectValue placeholder="Select invoice status" />
@@ -445,4 +468,6 @@ export default function NewInvoicePage() {
     </DashboardLayout>
   );
 }
+
+
 

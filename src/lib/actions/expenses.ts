@@ -1,9 +1,10 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { expenseSchema, expenseFormSchema, ExpenseSchema } from '@/lib/schemas/expense';
 import { getTenantId } from '@/lib/utils/tenant';
@@ -96,32 +97,38 @@ export async function getExpenses(): Promise<ExpenseSchema[]> {
     const expensesArray = await expensesCursor.toArray();
 
     // Map MongoDB document to schema
-     return expensesArray.map(doc => expenseSchema.parse({
-         ...doc,
-         id: doc._id?.toHexString(),
-         accountId: doc.accountId?.toHexString(), // Convert back to string for schema
-         vendorId: doc.vendorId?.toHexString() ?? undefined,
-         taxRateId: doc.taxRateId?.toHexString() ?? undefined,
-         date: new Date(doc.date),
-         amount: doc.amount, // Assuming stored as number
-         description: doc.description ?? undefined,
-         receiptUrl: doc.receiptUrl ?? undefined,
-         recurrenceRule: doc.recurrenceRule ?? undefined,
-         // Map nested objects, handle potential nulls from lookup
-         account: doc.account ? {
-             id: doc.account._id?.toHexString(),
-             name: doc.account.name,
-             code: doc.account.code,
-             type: doc.account.type,
-             // Add other required fields from accountSchema if needed
-         } : undefined, // Or provide a default/error object
-         vendor: doc.vendor ? {
-             id: doc.vendor._id?.toHexString(),
-             name: doc.vendor.name,
-              // Add other required fields from vendorSchema if needed
-         } : undefined,
-         // taxRate: doc.taxRate ? { ... } : undefined,
-     }));
+     return expensesArray.map(doc => {
+         // Serialize dates before parsing
+         const serializableDoc = {
+             ...doc,
+             id: doc._id?.toHexString(),
+             accountId: doc.accountId?.toHexString(), // Convert back to string for schema
+             vendorId: doc.vendorId?.toHexString() ?? undefined,
+             taxRateId: doc.taxRateId?.toHexString() ?? undefined,
+             date: doc.date?.toISOString(), // Convert Date to ISO string
+             createdAt: doc.createdAt?.toISOString(),
+             updatedAt: doc.updatedAt?.toISOString(),
+             amount: doc.amount, // Assuming stored as number
+             description: doc.description ?? undefined,
+             receiptUrl: doc.receiptUrl ?? undefined,
+             recurrenceRule: doc.recurrenceRule ?? undefined,
+             // Map nested objects, handle potential nulls from lookup
+             account: doc.account ? {
+                 id: doc.account._id?.toHexString(),
+                 name: doc.account.name,
+                 code: doc.account.code,
+                 type: doc.account.type,
+                 // Add other required fields from accountSchema if needed
+             } : undefined, // Or provide a default/error object
+             vendor: doc.vendor ? {
+                 id: doc.vendor._id?.toHexString(),
+                 name: doc.vendor.name,
+                  // Add other required fields from vendorSchema if needed
+             } : undefined,
+             // taxRate: doc.taxRate ? { ... } : undefined,
+         };
+         return expenseSchema.parse(serializableDoc);
+     });
   } catch (error: unknown) {
      console.error(`[ACTION_ERROR] ${context}:`, error);
      console.warn(`[DB_WARN] Returning empty expenses list for tenant ${tenantId} due to unexpected error.`);
@@ -177,14 +184,16 @@ export async function getExpenseById(idString: string): Promise<ExpenseSchema | 
     }
     const expenseDoc = expenseResult[0];
 
-     return expenseSchema.parse({
-         // Map fields similar to getExpenses
-          ...expenseDoc,
+     // Serialize dates before parsing
+     const serializableDoc = {
+         ...expenseDoc,
          id: expenseDoc._id?.toHexString(),
          accountId: expenseDoc.accountId?.toHexString(),
          vendorId: expenseDoc.vendorId?.toHexString() ?? undefined,
          taxRateId: expenseDoc.taxRateId?.toHexString() ?? undefined,
-         date: new Date(expenseDoc.date),
+         date: expenseDoc.date?.toISOString(),
+         createdAt: expenseDoc.createdAt?.toISOString(),
+         updatedAt: expenseDoc.updatedAt?.toISOString(),
          amount: expenseDoc.amount,
          description: expenseDoc.description ?? undefined,
          receiptUrl: expenseDoc.receiptUrl ?? undefined,
@@ -199,7 +208,9 @@ export async function getExpenseById(idString: string): Promise<ExpenseSchema | 
              id: expenseDoc.vendor._id?.toHexString(),
              name: expenseDoc.vendor.name,
          } : undefined,
-     });
+     };
+
+     return expenseSchema.parse(serializableDoc);
   } catch (error: unknown) {
       console.error(`[ACTION_ERROR] ${context}:`, error);
       console.warn(`[DB_WARN] Returning null for expense ${idString} (tenant ${tenantId}) due to unexpected error.`);

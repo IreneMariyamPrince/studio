@@ -1,4 +1,6 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const vendorSchema = z.object({
   id: z.string().optional(), // Optional for creation
@@ -8,8 +10,8 @@ export const vendorSchema = z.object({
   address: z.string().optional(),
   paymentTerms: z.string().optional(),
   balanceOwed: z.coerce.number().optional().default(0), // Handled by server actions/DB
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 });
 
 export type VendorSchema = z.infer<typeof vendorSchema>;

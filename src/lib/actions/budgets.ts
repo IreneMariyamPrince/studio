@@ -1,9 +1,10 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { Collection, ObjectId, WithId } from 'mongodb';
+import { Collection, ObjectId, WithId, MongoServerError } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { budgetSchema, budgetFormSchema, BudgetSchema } from '@/lib/schemas/budget';
 import { getTenantId } from '@/lib/utils/tenant';
@@ -80,19 +81,25 @@ export async function getBudgets(filters?: { year?: number }): Promise<BudgetSch
 
 
     // Map MongoDB document to schema
-     return budgetsWithAccounts.map(doc => budgetSchema.parse({
-        ...doc,
-        id: doc._id?.toHexString(),
-        accountId: doc.accountId?.toHexString(), // Convert ObjectId back to string for schema
-        amount: doc.amount, // Assuming amount is stored as number
-        // Map the joined account data
-        account: doc.accountInfo ? {
-             id: doc.accountInfo._id?.toHexString(),
-             name: doc.accountInfo.name,
-             code: doc.accountInfo.code,
-             // Add other fields required by accountSchema.optional() if needed
-        } : undefined,
-     }));
+     return budgetsWithAccounts.map(doc => {
+         // Serialize dates before parsing
+         const serializableDoc = {
+             ...doc,
+             id: doc._id?.toHexString(),
+             accountId: doc.accountId?.toHexString(), // Convert ObjectId back to string for schema
+             amount: doc.amount, // Assuming amount is stored as number
+             createdAt: doc.createdAt?.toISOString(),
+             updatedAt: doc.updatedAt?.toISOString(),
+             // Map the joined account data
+             account: doc.accountInfo ? {
+                  id: doc.accountInfo._id?.toHexString(),
+                  name: doc.accountInfo.name,
+                  code: doc.accountInfo.code,
+                  // Add other fields required by accountSchema.optional() if needed
+             } : undefined,
+         };
+         return budgetSchema.parse(serializableDoc);
+     });
   } catch (error) {
     console.error(`[ACTION_ERROR] ${context}:`, error);
     console.warn(`[DB_WARN] Returning empty budgets list for tenant ${tenantId} due to unexpected error.`);
@@ -180,6 +187,14 @@ export async function addBudget(formData: FormData): Promise<ActionResult> {
     return { success: true, message: `Budget for period ${newBudgetDocument.period} added successfully.`, data: { ...newBudgetDocument, id: result.insertedId.toHexString() } };
   } catch (error: unknown) {
      console.error(`[DB_ERROR] ${context}:`, error);
+      if (error instanceof MongoServerError && error.code === 11000) {
+         return {
+             success: false,
+             message: 'Database Error: A budget for this account and period already exists for this tenant.',
+             error: 'Duplicate Key',
+             fieldErrors: { period: ['Budget already exists for this account/period.'], accountId: ['Budget already exists for this account/period.']}
+          };
+      }
     return {
         success: false,
         message: 'Database Error: Failed to add budget.',

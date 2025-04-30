@@ -11,79 +11,78 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { AccountForm } from './account-form'; // Use local form component
-import { updateAccount } from '@/lib/actions/accounts';
-import type { AccountSchema, AccountFormSchema } from '@/lib/schemas/account'; // Keep AccountFormSchema
+import { ClientForm } from './client-form'; // Use local form component
+import { updateClient } from '@/lib/actions/clients';
+import type { ClientSchema, ClientFormSchema } from '@/lib/schemas/client'; // Import both schemas
 import { useToast } from "@/hooks/use-toast";
 import { Button } from '@/components/ui/button';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { accountFormSchema } from '@/lib/schemas/account'; // Import the form schema
+import { clientFormSchema } from '@/lib/schemas/client'; // Import the form schema
 
-// Define a type for the serializable account data passed from the server
-export type SerializableAccountData = Omit<AccountSchema, 'createdAt' | 'updatedAt'> & {
+// Define a type for the serializable client data passed from the server
+export type SerializableClientData = Omit<ClientSchema, 'createdAt' | 'updatedAt'> & {
     id: string; // Ensure ID is string
     createdAt?: string; // Date as string
     updatedAt?: string; // Date as string
 };
 
-interface EditAccountDialogProps {
+
+interface EditClientDialogProps {
   children: ReactNode; // Trigger element (e.g., Edit button)
-  account: SerializableAccountData; // Use the serializable type
+  client: SerializableClientData; // Use the serializable type
 }
 
-export function EditAccountDialog({ children, account }: EditAccountDialogProps) {
+export function EditClientDialog({ children, client }: EditClientDialogProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const { toast } = useToast();
 
-  // Prepare default values for the form schema from the *serializable* account data
-   const defaultFormValues: AccountFormSchema = {
-       code: account.code,
-       name: account.name,
-       type: account.type,
-       description: account.description ?? '', // Ensure string or empty string
-       isActive: account.isActive ?? true,
+  // Prepare default values for the form schema from the serializable client schema
+   const defaultFormValues: ClientFormSchema = {
+       name: client.name,
+       email: client.email ?? '', // Ensure string or empty string
+       phone: client.phone ?? '',
+       address: client.address ?? '',
+       paymentTerms: client.paymentTerms ?? '',
    };
 
   // Initialize react-hook-form with the form schema and prepared defaults
-  const form = useForm<AccountFormSchema>({
-    resolver: zodResolver(accountFormSchema),
+  const form = useForm<ClientFormSchema>({
+    resolver: zodResolver(clientFormSchema),
     defaultValues: defaultFormValues,
   });
 
-  // Reset form when dialog opens or account data changes externally
+  // Reset form when dialog opens or client data changes externally
   useEffect(() => {
       if (isOpen) {
-          // Re-calculate defaults in case account prop changed
-          const currentDefaultValues: AccountFormSchema = {
-               code: account.code,
-               name: account.name,
-               type: account.type,
-               description: account.description ?? '',
-               isActive: account.isActive ?? true,
+          // Re-calculate defaults in case client prop changed
+          const currentDefaultValues: ClientFormSchema = {
+               name: client.name,
+               email: client.email ?? '',
+               phone: client.phone ?? '',
+               address: client.address ?? '',
+               paymentTerms: client.paymentTerms ?? '',
            };
           form.reset(currentDefaultValues);
       }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, account]); // form.reset removed from dependencies
+  }, [isOpen, client]); // form.reset removed from dependencies
 
 
-  const onSubmit = (data: AccountFormSchema) => {
+  const onSubmit = (data: ClientFormSchema) => {
      form.clearErrors();
      const formData = new FormData();
-     formData.append('id', account.id); // Use the ID from the prop
+     formData.append('id', client.id); // Add the ID for the update action
 
      Object.entries(data).forEach(([key, value]) => {
-        if (typeof value === 'boolean') {
-         formData.append(key, value ? 'true' : 'false');
-       } else if (value !== undefined && value !== null && value !== '') { // Append non-empty strings/numbers
+       if (value !== undefined && value !== null && value !== '') { // Append non-empty strings/numbers
          formData.append(key, String(value));
        }
      });
 
     startTransition(async () => {
-      const result = await updateAccount(formData);
+      const result = await updateClient(formData);
       if (result.success) {
         setIsOpen(false);
         toast({
@@ -92,21 +91,21 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
         });
       } else {
          toast({
-          title: "Error Updating Account",
+          title: "Error Updating Client",
           description: result.message || "An unexpected error occurred.",
           variant: "destructive",
         });
         if (result.fieldErrors) {
           Object.entries(result.fieldErrors).forEach(([fieldName, errors]) => {
             if (errors && errors.length > 0) {
-              form.setError(fieldName as keyof AccountFormSchema, {
+              form.setError(fieldName as keyof ClientFormSchema, {
                 type: 'server',
                 message: errors[0],
               });
             }
           });
         }
-         console.error("Error updating account:", result.error, result.fieldErrors);
+         console.error("Error updating client:", result.error, result.fieldErrors);
       }
     });
   };
@@ -121,12 +120,12 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
       <DialogTrigger asChild>{children}</DialogTrigger>
       <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
-          <DialogTitle>Edit Account</DialogTitle>
+          <DialogTitle>Edit Client</DialogTitle>
           <DialogDescription>
-            Update the details for the account "{account.name}".
+            Update the details for the client "{client.name}".
           </DialogDescription>
         </DialogHeader>
-        <AccountForm
+        <ClientForm
           form={form}
           onSubmit={onSubmit}
           isPending={isPending}
@@ -137,4 +136,3 @@ export function EditAccountDialog({ children, account }: EditAccountDialogProps)
     </Dialog>
   );
 }
-

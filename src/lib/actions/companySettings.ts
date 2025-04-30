@@ -1,4 +1,5 @@
 
+
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -45,14 +46,18 @@ export async function getCompanySettings(): Promise<CompanySettingSchema | null>
        return null;
     }
 
-    // Validate and map fetched data
-    return companySettingSchema.parse({
+    // Serialize dates before parsing
+    const serializableDoc = {
         ...settingsDoc,
         id: settingsDoc._id?.toHexString(),
         companyName: settingsDoc.companyName ?? undefined,
         logoUrl: settingsDoc.logoUrl ?? undefined,
         address: settingsDoc.address ?? undefined,
-    });
+        createdAt: settingsDoc.createdAt?.toISOString(),
+        updatedAt: settingsDoc.updatedAt?.toISOString(),
+    };
+    // Validate and map fetched data
+    return companySettingSchema.parse(serializableDoc);
   } catch (error) {
     console.error(`[ACTION_ERROR] ${context}:`, error);
     console.warn(`[DB_WARN] Returning null for company settings for tenant ${tenantId} due to unexpected error.`);
@@ -116,6 +121,8 @@ export async function updateCompanySettings(formData: FormData): Promise<ActionR
      const returnData = updatedDoc ? companySettingSchema.parse({
          ...updatedDoc,
          id: updatedDoc._id.toHexString(),
+         createdAt: updatedDoc.createdAt?.toISOString(),
+         updatedAt: updatedDoc.updatedAt?.toISOString(),
          // ensure optional fields are handled
      }) : null;
 

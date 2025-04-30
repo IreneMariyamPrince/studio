@@ -1,18 +1,21 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 import { accountSchema } from './account'; // Assuming account schema exists
 
 export const entryTypes = ['Debit', 'Credit'] as const;
 
 export const journalEntryLineSchema = z.object({
+
   id: z.string().optional(),
   journalEntryId: z.string().optional(), // Linked on creation
   accountId: z.string({ message: "Account is required for each line." }),
   type: z.enum(entryTypes, { required_error: "Entry type (Debit/Credit) is required." }),
   amount: z.coerce.number().positive({ message: "Amount must be positive." }),
   description: z.string().optional(),
-  createdAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 
-  // Optional relation data
+  // Optional relation data (Ensure AccountSchema uses ObjectId validation if included)
   // account: accountSchema.optional(),
 });
 
@@ -26,6 +29,7 @@ export const journalEntrySchema = z.object({
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
   createdById: z.string().optional(), // Link to User
+
 
   // Array of lines
   lines: z.array(journalEntryLineSchema).min(2, { message: "A journal entry must have at least two lines (one debit, one credit)." })

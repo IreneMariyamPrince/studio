@@ -1,4 +1,3 @@
-
 'use server';
 
 import { revalidatePath } from 'next/cache';
@@ -42,15 +41,19 @@ export async function getClients(): Promise<ClientSchema[]> {
     const clientsArray = await clientsCursor.toArray();
 
     // Map MongoDB document to schema
-    return clientsArray.map(doc => clientSchema.parse({
-        ...doc,
-        id: doc._id?.toHexString(),
-        email: doc.email ?? undefined,
-        phone: doc.phone ?? undefined,
-        address: doc.address ?? undefined,
-        paymentTerms: doc.paymentTerms ?? undefined,
-        balanceDue: doc.balanceDue ?? 0,
-    }));
+    return clientsArray.map(doc => {
+        // Check if _id exists before attempting to convert to hex string. fixes: ZodError: Invalid cuid
+        const id = doc._id ? doc._id.toHexString() : undefined;
+        return clientSchema.parse({
+            ...doc,
+            id: id ?? undefined,
+            email: doc.email ?? undefined,
+            phone: doc.phone ?? undefined,
+            address: doc.address ?? undefined,
+            paymentTerms: doc.paymentTerms ?? undefined,
+            balanceDue: doc.balanceDue ?? 0,
+    })
+    });
   } catch (error) {
      console.error(`[ACTION_ERROR] ${context}:`, error);
      console.warn(`[DB_WARN] Returning empty clients list for tenant ${tenantId} due to unexpected error.`);
@@ -118,7 +121,7 @@ export async function addClient(formData: FormData): Promise<ActionResult> {
   } catch (error: unknown) {
     console.error(`[DB_ERROR] ${context}:`, error);
     // Handle potential duplicate key errors if index is set on email+tenantId
-    if ((error as any).code === 11000 && (error as any).message.includes('email')) { // Basic check for duplicate key error on email
+    if ((error as any).code === 11000 && (error as any).message.includes('email')) {
         return {
             success: false,
             message: 'Database Error: A client with this email already exists for this tenant.',
@@ -168,7 +171,7 @@ export async function updateClient(formData: FormData): Promise<ActionResult> {
    if (!validatedFields.success) {
         const fieldErrors = validatedFields.error.flatten().fieldErrors;
         console.error(`[VALIDATION_ERROR] ${context}:`, fieldErrors);
-        return { success: false, message: 'Validation failed.', error: 'Validation Error', fieldErrors };
+        return { success: false, message: 'Validation failed.', error: "Validation Error", fieldErrors };
     }
 
     const { id, ...updateData } = validatedFields.data;
@@ -249,7 +252,7 @@ export async function deleteClient(idString: string): Promise<ActionResult> {
         }
 
         // 2. Check for related invoices (important!)
-         const relatedInvoice = await invoicesCollection.findOne({ clientId: clientId, tenantId: tenantId }, { projection: { _id: 1 } }); // Assuming tenantId is also on invoices
+         const relatedInvoice = await invoicesCollection.findOne({ clientId: clientId, tenantId: tenantId }, { projection: { _id: 1 } });
          if (relatedInvoice) {
              return { success: false, message: 'Cannot delete client: Client has associated invoices.', error: 'Constraint Violation' };
          }

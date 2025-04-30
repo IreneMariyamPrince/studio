@@ -1,10 +1,12 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 
 export const tenantSchema = z.object({
   id: z.string().optional(), // Optional for creation
   name: z.string().min(2, { message: "Tenant name must be at least 2 characters." }),
-  createdAt: z.coerce.date().optional(),
-  updatedAt: z.coerce.date().optional(),
+  createdAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
+  updatedAt: z.coerce.date().or(z.string().datetime()).optional(), // Allow Date or ISO string
 });
 
 export type TenantSchema = z.infer<typeof tenantSchema>;

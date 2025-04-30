@@ -1,4 +1,6 @@
+
 import { z } from 'zod';
+import { ObjectId } from 'mongodb'; // Import ObjectId for validation
 import { accountSchema } from './account'; // Import Account schema
 import { vendorSchema } from './vendor';   // Import Vendor schema
 import { taxRateSchema } from './taxRate'; // Import TaxRate schema
@@ -6,6 +8,7 @@ import { taxRateSchema } from './taxRate'; // Import TaxRate schema
 export const expenseStatus = ['Pending', 'Approved', 'Rejected', 'Paid'] as const;
 
 export const expenseSchema = z.object({
+
   id: z.string().optional(), // Optional for creation
   date: z.coerce.date({ required_error: "Expense date is required." }),
   accountId: z.string({ message: "Please select an expense account." }),
@@ -20,7 +23,8 @@ export const expenseSchema = z.object({
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
 
-  // Related data included from Prisma fetches
+
+  // Related data included from fetches (ensure related schemas also use ObjectId validation)
   account: accountSchema.optional(),
   vendor: vendorSchema.optional(),
   // taxRate: taxRateSchema.optional(),
