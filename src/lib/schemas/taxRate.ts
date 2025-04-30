@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const taxRateSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(1, { message: "Tax rate name is required." }), // e.g., "VAT", "GST"
   ratePercent: z.coerce.number().nonnegative({ message: "Rate must be non-negative." }).max(100, { message: "Rate cannot exceed 100." }), // e.g., 20.00 for 20%
   description: z.string().optional(),

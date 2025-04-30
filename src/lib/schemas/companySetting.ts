@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 export const companySettingSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
-  tenantId: z.string().cuid({ message: "Tenant ID is required." }),
+  id: z.string().optional(), // Optional for creation
+  tenantId: z.string({ message: "Tenant ID is required." }),
   companyName: z.string().optional(),
   logoUrl: z.string().url({ message: "Invalid URL format for logo." }).optional().or(z.literal('')),
   address: z.string().optional(),

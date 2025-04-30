@@ -4,13 +4,13 @@ import { taxRateSchema } from './taxRate'; // Import TaxRate schema
 import { accountSchema } from './account'; // Import Account schema
 
 export const invoiceItemSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
-  invoiceId: z.string().cuid().optional(), // Optional for creation, linked later
+  id: z.string().optional(), // Optional for creation
+  invoiceId: z.string().optional(), // Optional for creation, linked later
   description: z.string().min(1, { message: "Item description cannot be empty." }),
   quantity: z.coerce.number().int().positive({ message: "Quantity must be positive." }),
   unitPrice: z.coerce.number().nonnegative({ message: "Unit price cannot be negative." }),
   total: z.coerce.number().optional(), // Calculated field (quantity * unitPrice + tax)
-  taxRateId: z.string().cuid().optional(), // Optional link to TaxRate
+  taxRateId: z.string().optional(), // Optional link to TaxRate
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
 
@@ -23,9 +23,9 @@ export type InvoiceItemSchema = z.infer<typeof invoiceItemSchema>;
 export const invoiceStatus = ['Draft', 'Pending', 'Paid', 'Partial', 'Overdue', 'Cancelled'] as const;
 
 export const invoiceSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().optional(), // Optional for creation
   invoiceNumber: z.string().optional(), // Generated on creation
-  clientId: z.string().cuid({ message: "Please select a client." }),
+  clientId: z.string({ message: "Please select a client." }),
   issueDate: z.coerce.date({ required_error: "Issue date is required." }),
   dueDate: z.coerce.date({ required_error: "Due date is required." }),
   status: z.enum(invoiceStatus),
@@ -34,7 +34,7 @@ export const invoiceSchema = z.object({
   total: z.coerce.number().optional(), // Calculated field (sum of item totals)
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
-  revenueAccountId: z.string().cuid().optional(), // Optional link to revenue account
+  revenueAccountId: z.string().optional(), // Optional link to revenue account
 
   // Related data included from Prisma fetches
   client: clientSchema.optional(),

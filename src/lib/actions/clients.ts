@@ -6,6 +6,7 @@ import { Collection, ObjectId, WithId } from 'mongodb';
 import { connectToDatabase } from '@/lib/mongodb';
 import { clientSchema, clientFormSchema, ClientSchema } from '@/lib/schemas/client';
 import { getTenantId } from '@/lib/utils/tenant';
+import { z } from 'zod'; // Import z
 
 // Type definition for MongoDB documents
 type ClientDocument = Omit<ClientSchema, 'id'> & { _id?: ObjectId; tenantId: string; createdAt?: Date; updatedAt?: Date };

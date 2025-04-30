@@ -4,9 +4,9 @@ import { accountSchema } from './account'; // Assuming account schema exists
 export const entryTypes = ['Debit', 'Credit'] as const;
 
 export const journalEntryLineSchema = z.object({
-  id: z.string().cuid().optional(),
-  journalEntryId: z.string().cuid().optional(), // Linked on creation
-  accountId: z.string().cuid({ message: "Account is required for each line." }),
+  id: z.string().optional(),
+  journalEntryId: z.string().optional(), // Linked on creation
+  accountId: z.string({ message: "Account is required for each line." }),
   type: z.enum(entryTypes, { required_error: "Entry type (Debit/Credit) is required." }),
   amount: z.coerce.number().positive({ message: "Amount must be positive." }),
   description: z.string().optional(),
@@ -19,13 +19,13 @@ export const journalEntryLineSchema = z.object({
 export type JournalEntryLineSchema = z.infer<typeof journalEntryLineSchema>;
 
 export const journalEntrySchema = z.object({
-  id: z.string().cuid().optional(),
+  id: z.string().optional(),
   entryDate: z.coerce.date({ required_error: "Entry date is required." }),
   description: z.string().min(1, { message: "Description is required." }),
   reference: z.string().optional(),
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
-  createdById: z.string().cuid().optional(), // Link to User
+  createdById: z.string().optional(), // Link to User
 
   // Array of lines
   lines: z.array(journalEntryLineSchema).min(2, { message: "A journal entry must have at least two lines (one debit, one credit)." })

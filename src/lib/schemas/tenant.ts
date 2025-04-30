@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const tenantSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(2, { message: "Tenant name must be at least 2 characters." }),
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),

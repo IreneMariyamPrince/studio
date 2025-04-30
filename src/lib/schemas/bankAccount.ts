@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const bankAccountSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation
+  id: z.string().optional(), // Optional for creation
   name: z.string().min(1, { message: "Account name is required." }),
   accountNumber: z.string().optional(), // Store masked or partial for security
   bankName: z.string().optional(),

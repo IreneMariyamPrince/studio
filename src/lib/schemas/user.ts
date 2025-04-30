@@ -4,14 +4,14 @@ import type { TenantSchema } from './tenant'; // Import Tenant schema type if ne
 export const userRoles = ['Admin', 'Accountant', 'Viewer'] as const;
 
 export const userSchema = z.object({
-  id: z.string().cuid().optional(), // Optional for creation if using DB IDs
+  id: z.string().optional(), // Optional for creation if using DB IDs
   firebaseUid: z.string().optional(), // Firebase UID is often the primary identifier
   email: z.string().email({ message: "Invalid email address." }),
   name: z.string().optional(),
   role: z.enum(userRoles).default('Viewer'),
   isActive: z.boolean().optional().default(true),
   isSuperAdmin: z.boolean().optional().default(false), // Flag for super admin
-  tenantId: z.string().cuid().optional(), // Tenant association (optional for SuperAdmin)
+  tenantId: z.string().optional(), // Tenant association (optional for SuperAdmin)
   createdAt: z.coerce.date().optional(),
   updatedAt: z.coerce.date().optional(),
 
